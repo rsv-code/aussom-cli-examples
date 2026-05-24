@@ -1,0 +1,19 @@
+include sys;
+
+/**
+ * Hello World App just prints information to standard output including
+ * the current system information.
+ */
+class HelloWorld {
+    /**
+     * The main() function provides a list of program args and is the
+     * entry point of the application. This is the first function called
+     * by the Aussom runtime.
+     * @p args is a list of arguments provided on the command line.
+     */
+    public main(args) {
+        c.log("App: helloworld.aus\n");
+        c.log("System Info:");
+        c.log(sys.getSysInfo());
+    }
+}
