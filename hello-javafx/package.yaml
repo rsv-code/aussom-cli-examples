@@ -34,6 +34,7 @@ installer:
       enabled: false
   windows:
     # icon: package-files/icons/app.ico    # uncomment + drop a multi-resolution ICO here
+    console: false
     types:
     - msi
     shortcut: true

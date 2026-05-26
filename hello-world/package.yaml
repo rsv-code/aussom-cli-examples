@@ -38,6 +38,7 @@ installer:
     types:
     - msi
     # icon: package-files/icons/app.ico
+    console: true
     shortcut: true
     fileAssociations: []
     launchers: []
