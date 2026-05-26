@@ -1,0 +1,6 @@
+#!/bin/sh
+# prerm - Debian package hook for this app.
+# Runs as root. Edit as needed.
+set -e
+rm /usr/bin/hellogtk
+exit 0

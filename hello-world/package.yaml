@@ -1,0 +1,70 @@
+name: helloworld
+version: 1.0.0
+description: Installer project for helloworld.
+license: Apache-2.0
+author: Austin Lehman
+authorEmail: cupofcode@yahoo.com.com
+type: pure
+dependencies: { }
+installer:
+  enabled: true
+  appName: helloworld
+  version: 1.0.0
+  vendor: Austin Lehman
+  copyright: Copyright 2026 Austin Lehman
+  description: Description of helloworld.
+  mainScript: helloworld.aus
+  appArgs: [ ]
+  javaOptions:
+  - --enable-native-access=ALL-UNNAMED
+  - --add-opens=java.base/jdk.internal.module=ALL-UNNAMED
+  linux:
+    types:
+    - deb
+    # icon: package-files/icons/app.png
+    shortcut: true
+    fileAssociations: []
+    launchers: []
+    javaOptions: []
+    bundle:
+      modules: []
+      fx: false
+      gtk: false
+      extraJars: []
+      extraResources: []
+    signing:
+      enabled: false
+  windows:
+    types:
+    - msi
+    # icon: package-files/icons/app.ico
+    shortcut: true
+    fileAssociations: []
+    launchers: []
+    javaOptions: []
+    bundle:
+      modules: []
+      fx: false
+      gtk: false
+      extraJars: []
+      extraResources: []
+    signing:
+      enabled: false
+      identity: ''
+  macos:
+    types:
+    - pkg
+    # icon: package-files/icons/app.icns
+    shortcut: false
+    fileAssociations: [ ]
+    launchers: [ ]
+    javaOptions: [ ]
+    bundle:
+      modules: [ ]
+      fx: false
+      gtk: false
+      extraJars: [ ]
+      extraResources: [ ]
+    signing:
+      enabled: false
+      identity: ''

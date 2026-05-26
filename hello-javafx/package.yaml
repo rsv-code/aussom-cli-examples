@@ -1,0 +1,64 @@
+name: hellojavafx
+version: 1.0.0
+description: Installer project for hellojavafx.
+license: Apache-2.0
+author: Austin Lehman
+authorEmail: cupofcode@yahoo.com
+type: pure
+dependencies: { }
+installer:
+  enabled: true
+  appName: hellojavafx
+  version: 1.0.0
+  vendor: Austin Lehman
+  copyright: Copyright 2026 Austin Lehman
+  description: This is the hello world JavaFX app.
+  mainScript: hellojavafx.aus
+  appArgs: [ ]
+  javaOptions:
+  - --enable-native-access=ALL-UNNAMED
+  - --add-opens=java.base/jdk.internal.module=ALL-UNNAMED
+  linux:
+    # icon: package-files/icons/app.png    # uncomment + drop a 1024x1024 PNG here
+    types:
+    - deb
+    shortcut: true
+    fileAssociations: [ ]
+    launchers: [ ]
+    javaOptions: [ ]
+    bundle:
+      fx: true
+      extraJars: [ ]
+      extraResources: [ ]
+    signing:
+      enabled: false
+  windows:
+    # icon: package-files/icons/app.ico    # uncomment + drop a multi-resolution ICO here
+    types:
+    - msi
+    shortcut: true
+    fileAssociations: [ ]
+    launchers: [ ]
+    javaOptions: [ ]
+    bundle:
+      fx: true
+      extraJars: [ ]
+      extraResources: [ ]
+    signing:
+      enabled: false
+      identity: ''
+  macos:
+    # icon: package-files/icons/app.icns    # uncomment + drop an ICNS bundle here
+    types:
+    - pkg
+    shortcut: false
+    fileAssociations: [ ]
+    launchers: [ ]
+    javaOptions: [ ]
+    bundle:
+      fx: true
+      extraJars: [ ]
+      extraResources: [ ]
+    signing:
+      enabled: false
+      identity: ''

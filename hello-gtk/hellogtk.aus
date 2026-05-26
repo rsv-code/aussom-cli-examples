@@ -1,0 +1,41 @@
+include panama;
+include gtk.gtk.functions;
+include gtk.gtk.window;
+include gtk.gtk.label;
+
+class helloWorldApp {
+    public gtkApi = null;
+    public mainIter = null;
+    public running = true;
+    public window = null;
+    public helloWorldApp() {
+        this.gtkApi = new GtkApi();
+        glibLib = panama.openLibrary("libglib-2.0.so.0");
+        this.mainIter = glibLib.bind("g_main_context_iteration",
+                panama.funcType("int", ["pointer", "int"]));
+    }
+    public run() {
+        this.gtkApi.init();
+        this.window = new Window();
+        this.window.set_title("HelloGTK");
+        this.window.set_default_size(320, 120);
+        this.window.setOnCloserequest(::onClose);
+        this.window.set_child(new Label("Hello, GTK4."));
+        this.window.present();
+        while (this.running) {
+            this.mainIter.call(panama.nullHandle("GMainContext*"), 1);
+        }
+        return null;
+    }
+    public onClose(object Self) {
+        c.log("closing");
+        this.running = false;
+        return false;
+    }
+}
+class Main {
+    public main(args) {
+        app = new helloWorldApp();
+        app.run();
+    }
+}

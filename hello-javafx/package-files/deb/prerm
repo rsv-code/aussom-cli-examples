@@ -1,0 +1,6 @@
+#!/bin/sh
+# prerm - Debian package hook for this app.
+# Runs as root. Edit as needed; default is a no-op.
+set -e
+rm /usr/bin/hellojavafx
+exit 0

@@ -1,0 +1,6 @@
+#!/bin/sh
+# postinst - Debian package hook for this app.
+# Runs as root. Edit as needed; default is a no-op.
+set -e
+ln -s /opt/hellojavafx/bin/hellojavafx /usr/bin/hellojavafx
+exit 0

@@ -1,0 +1,20 @@
+include fx;
+include fx.StackPane;
+include fx.Label;
+
+/**
+ * A basic JavaFX app in Aussom.
+ */
+class HelloJavaFX {
+    /**
+     * The app entry point.
+     */
+    public main(args) {
+        app = fx.fxApp("Hello JavaFX!", 200, 100);
+        layout = new StackPane();
+        layout.add(new Label("Hello, Aussom FX!"));
+        app.setLayout(layout.obj);
+        app.show(true);
+        fx.shutdown();
+    }
+}
