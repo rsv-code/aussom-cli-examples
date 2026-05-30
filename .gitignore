@@ -1,6 +1,7 @@
 target/
-
 .idea/
+/design
+CLAUDE.md
 
 # Compiled class file
 *.class

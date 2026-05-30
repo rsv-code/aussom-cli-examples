@@ -1,0 +1,397 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Ported to Aussom from the FXGLGames "Cannon" demo by
+ * Almas Baimagambetov, available at
+ * https://github.com/AlmasB/FXGLGames and used here under the MIT
+ * License. The original game and the FXGL engine are
+ * Copyright (c) 2015 AlmasB (almaslvl@gmail.com).
+ *
+ * Game:
+ * The player shoots from a "cannon" toward the mouse cursor and tries
+ * to drop the projectile between the two barriers so it lands on the
+ * hidden ground strip, scoring 1000 points per hit.
+ */
+
+include fx;
+include fx.Rectangle;
+include fx.Color;
+include fx.Text;
+include fxgl;
+include fxgl.Entity;
+include fxgl.GameSettings;
+include fxgl.GameWorld;
+include fxgl.GameScene;
+include fxgl.Component;
+include fxgl.PhysicsComponent;
+include fxgl.PhysicsWorld;
+include fxgl.CollidableComponent;
+include fxgl.CollisionHandler;
+include fxgl.UserAction;
+include fxgl.Input;
+include fxgl.Vec2;
+
+/**
+ * Bobs an entity up and down along the Y axis at a fixed speed,
+ * reversing direction each time it travels the configured range. Driven
+ * by a Component attached to the entity.
+ */
+class Lift {
+    /** The entity being moved. */
+    public entity = null;
+    /** The driving Component. */
+    public comp = null;
+    /** Travel speed in pixels per second. */
+    public speed = 150.0;
+    /** Distance traveled before reversing, in pixels. */
+    public range = 150.0;
+    /** Whether the entity is currently moving up. */
+    public goingUp = true;
+    /** Distance traveled in the current direction. */
+    public traveled = 0.0;
+
+    /**
+     * Builds a Component that bobs the given entity.
+     * @p EntityObj is the Entity wrapper to move.
+     */
+    public Lift(object EntityObj) {
+        this.entity = EntityObj;
+        this.comp = new Component();
+        this.comp.onUpdate(::onUpdate);
+    }
+
+    /**
+     * Moves the entity one frame's worth and reverses at the range edge.
+     * @p tpf is the per-frame time in seconds.
+     */
+    public onUpdate(tpf) {
+        step = this.speed * tpf;
+        if (this.goingUp) {
+            this.entity.translate(0.0, 0.0 - step);
+        } else {
+            this.entity.translate(0.0, step);
+        }
+        this.traveled = this.traveled + step;
+        if (this.traveled >= this.range) {
+            this.traveled = 0.0;
+            this.goingUp = (this.goingUp == false);
+        }
+    }
+}
+
+/**
+ * Drives a single bullet: applies the launch velocity once the physics
+ * body has been created, and removes the bullet after four seconds.
+ */
+class Bullet {
+    /** The bullet entity. */
+    public entity = null;
+    /** The bullet's PhysicsComponent. */
+    public physics = null;
+    /** The expiry Component. */
+    public expire = null;
+    /** Launch velocity X in pixels per second. */
+    public vx = 0.0;
+    /** Launch velocity Y in pixels per second. */
+    public vy = 0.0;
+    /** Seconds elapsed since the bullet was added. */
+    public age = 0.0;
+
+    /**
+     * Builds a dynamic-body PhysicsComponent and an expiry Component.
+     * The launch velocity is applied as soon as the physics body is
+     * created via onPhysicsInitialized.
+     * @p Vx is the launch velocity X in pixels per second.
+     * @p Vy is the launch velocity Y in pixels per second.
+     * @p EntityObj is the bullet Entity wrapper.
+     */
+    public Bullet(double Vx, double Vy, object EntityObj) {
+        this.vx = Vx;
+        this.vy = Vy;
+        this.entity = EntityObj;
+
+        this.physics = new PhysicsComponent();
+        this.physics.setBodyType("DYNAMIC");
+        this.physics.setDensity(0.05);
+        this.physics.onPhysicsInitialized(::applyVelocity);
+
+        this.expire = new Component();
+        this.expire.onUpdate(::tick);
+    }
+
+    /**
+     * Applies the stored launch velocity. Invoked by FXGL when the
+     * physics body has been created.
+     */
+    public applyVelocity() {
+        this.physics.setLinearVelocity(this.vx, this.vy);
+    }
+
+    /**
+     * Accumulates age and removes the bullet after four seconds.
+     * @p tpf is the per-frame time in seconds.
+     */
+    public tick(tpf) {
+        this.age = this.age + tpf;
+        if (this.age > 4.0) {
+            this.entity.removeFromWorld();
+        }
+    }
+}
+
+/**
+ * The Cannon game application. Wires the FXGL lifecycle callbacks and
+ * builds the cannon, barriers, ground, bullets, collision scoring, and
+ * the score readout.
+ */
+class CannonApp {
+    /** Game window width in pixels. */
+    public width = 800;
+    /** Game window height in pixels. */
+    public height = 600;
+
+    /** The fxglApp returned by fxgl.gameApp. */
+    public app = null;
+    /** The running game's GameWorld wrapper. */
+    public world = null;
+    /** The running game's Input wrapper. */
+    public input = null;
+    /** The cannon Entity wrapper. */
+    public cannon = null;
+    /** The cannon's bobbing controller. */
+    public cannonLift = null;
+    /** The score Text wrapper. */
+    public scoreText = null;
+    /** The current score. */
+    public score = 0;
+    /** Keeps live Bullet controllers reachable. */
+    public bullets = [];
+
+    /**
+     * The app entry point. Configures the lifecycle callbacks and
+     * launches the game in standalone mode.
+     * @p args is a list of command line arguments.
+     */
+    public main(args) {
+        this.build("Cannon");
+        this.app.launch();
+    }
+
+    /**
+     * Creates the fxglApp and registers the game's lifecycle callbacks
+     * without launching. Tests use this to attach a driving onUpdate
+     * before calling launch.
+     * @p Title is the game window title.
+     * @r The configured fxglApp.
+     */
+    public build(string Title) {
+        this.app = fxgl.gameApp(Title, this.width, this.height);
+        this.app.onInitSettings(::onInitSettings);
+        this.app.onInitInput(::onInitInput);
+        this.app.onInitGame(::onInitGame);
+        this.app.onInitPhysics(::onInitPhysics);
+        this.app.onInitUI(::onInitUI);
+        return this.app;
+    }
+
+    /**
+     * Disables FXGL's filesystem writes (the `logs/` and `system/`
+     * directories it would otherwise create in the working directory).
+     * @p Settings is the GameSettings wrapper.
+     */
+    public onInitSettings(object Settings) {
+        Settings.setFileSystemWriteAllowed(false);
+        Settings.setUserProfileEnabled(false);
+    }
+
+    /**
+     * Binds the left mouse button to the shoot action.
+     */
+    public onInitInput() {
+        this.input = fxgl.getInput();
+
+        action = new UserAction("Shoot");
+        action.onActionBegin(::shoot);
+        this.input.addActionMouse(action, "PRIMARY");
+    }
+
+    /**
+     * Builds the static world: screen bounds, cannon, and basket.
+     */
+    public onInitGame() {
+        this.world = fxgl.getGameWorld();
+        this.score = 0;
+        this.initScreenBounds();
+        this.initCannon();
+        this.initBasket();
+    }
+
+    /**
+     * Builds four solid, invisible walls around the screen edges so
+     * bullets stay in play.
+     */
+    public initScreenBounds() {
+        this.spawnWall(0.0 - 100.0, 0.0, 100.0, this.height);
+        this.spawnWall(this.width, 0.0, 100.0, this.height);
+        this.spawnWall(0.0, 0.0 - 100.0, this.width, 100.0);
+        this.spawnWall(0.0, this.height, this.width, 100.0);
+    }
+
+    /**
+     * Spawns one invisible, solid wall.
+     * @p X is the wall X position.
+     * @p Y is the wall Y position.
+     * @p W is the wall width.
+     * @p H is the wall height.
+     */
+    public spawnWall(double X, double Y, double W, double H) {
+        e = new Entity();
+        e.setType("WALL");
+        e.setPosition(X, Y);
+        e.addBoundingBox(W, H);
+        e.addComponent(new PhysicsComponent());
+        this.world.addEntity(e);
+    }
+
+    /**
+     * Spawns the cannon: a brown box on the left that bobs up and down.
+     */
+    public initCannon() {
+        this.cannon = new Entity();
+        this.cannon.setType("CANNON");
+        this.cannon.setPosition(50.0, this.height - 300.0);
+        this.addRectView(this.cannon, 70.0, 30.0, new Color("#A52A2A"));
+
+        this.cannonLift = new Lift(this.cannon);
+        this.cannon.addComponent(this.cannonLift.comp);
+
+        this.world.addEntity(this.cannon);
+    }
+
+    /**
+     * Spawns the two barriers and the hidden ground strip between them.
+     */
+    public initBasket() {
+        this.spawnBarrier(400.0, this.height - 300.0);
+        this.spawnBarrier(700.0, this.height - 300.0);
+        this.spawnGround(500.0, this.height);
+    }
+
+    /**
+     * Spawns a solid red barrier. Barriers block bullets physically but
+     * are not collidable, so they do not score.
+     * @p X is the barrier X position.
+     * @p Y is the barrier Y position.
+     */
+    public spawnBarrier(double X, double Y) {
+        e = new Entity();
+        e.setType("BASKET");
+        e.setPosition(X, Y);
+        this.addRectView(e, 100.0, 300.0, new Color("#FF0000"));
+        e.addBoundingBox(100.0, 300.0);
+        e.addComponent(new PhysicsComponent());
+        this.world.addEntity(e);
+    }
+
+    /**
+     * Spawns the transparent, collidable ground strip. A bullet landing
+     * here triggers the score.
+     * @p X is the ground X position.
+     * @p Y is the ground Y position.
+     */
+    public spawnGround(double X, double Y) {
+        e = new Entity();
+        e.setType("BASKET");
+        e.setPosition(X, Y);
+        this.addRectView(e, 300.0, 5.0, new Color("#000000", 0.0));
+        e.addBoundingBox(300.0, 5.0);
+        e.addComponent(new CollidableComponent(true));
+        e.addComponent(new PhysicsComponent());
+        this.world.addEntity(e);
+    }
+
+    /**
+     * Fires a bullet from the cannon's muzzle toward the mouse cursor.
+     */
+    public shoot() {
+        startX = this.cannon.getX() + 70.0;
+        startY = this.cannon.getY();
+
+        direction = new Vec2(this.input.getMouseXWorld() - startX, this.input.getMouseYWorld() - startY);
+        direction.normalizeLocal();
+
+        this.spawnBullet(startX, startY, direction.getX() * 800.0, direction.getY() * 800.0);
+    }
+
+    /**
+     * Spawns a blue bullet with the given start position and velocity.
+     * The bullet is collidable and has a dynamic physics body driven by a
+     * Bullet controller.
+     * @p StartX is the spawn X position.
+     * @p StartY is the spawn Y position.
+     * @p Vx is the launch velocity X in pixels per second.
+     * @p Vy is the launch velocity Y in pixels per second.
+     * @r The bullet Entity wrapper.
+     */
+    public spawnBullet(double StartX, double StartY, double Vx, double Vy) {
+        e = new Entity();
+        e.setType("BULLET");
+        e.setPosition(StartX, StartY);
+        this.addRectView(e, 25.0, 25.0, new Color("#0000FF"));
+        e.addBoundingBox(25.0, 25.0);
+        e.addComponent(new CollidableComponent(true));
+
+        ball = new Bullet(Vx, Vy, e);
+        e.addComponent(ball.physics);
+        e.addComponent(ball.expire);
+        this.bullets.add(ball);
+
+        this.world.addEntity(e);
+        return e;
+    }
+
+    /**
+     * Registers the bullet/basket collision handler that scores hits.
+     */
+    public onInitPhysics() {
+        handler = new CollisionHandler("BULLET", "BASKET");
+        handler.onCollisionBegin(::onBulletHitBasket);
+
+        fxgl.getPhysicsWorld().addCollisionHandler(handler);
+    }
+
+    /**
+     * Removes the bullet and adds to the score when a bullet lands on
+     * the collidable ground.
+     * @p BulletEntity is the bullet Entity wrapper.
+     * @p BasketEntity is the ground Entity wrapper.
+     */
+    public onBulletHitBasket(object BulletEntity, object BasketEntity) {
+        BulletEntity.removeFromWorld();
+        this.score = this.score + 1000;
+        if (this.scoreText != null) {
+            this.scoreText.setText("Score: [" + this.score + "]");
+        }
+    }
+
+    /**
+     * Builds the score readout in the top-right of the screen.
+     */
+    public onInitUI() {
+        this.scoreText = new Text(550.0, 100.0, "Score: [0]");
+        fxgl.getGameScene().addUINode(this.scoreText);
+    }
+
+    /**
+     * Adds a filled rectangle view to an entity.
+     * @p EntityObj is the Entity wrapper to add the view to.
+     * @p W is the rectangle width.
+     * @p H is the rectangle height.
+     * @p ColorObj is the fill Color wrapper.
+     */
+    public addRectView(object EntityObj, double W, double H, object ColorObj) {
+        rect = new Rectangle(0.0, 0.0, W, H);
+        rect.setFill(ColorObj);
+        EntityObj.addViewNode(rect);
+    }
+}

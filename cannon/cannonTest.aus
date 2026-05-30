@@ -1,0 +1,125 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * TestFX-driven verification for the Aussom port of the FXGLGames
+ * "Cannon" demo. The suite launches a real headless FXGL game using
+ * CannonApp's own lifecycle wiring, drives the game loop for a short
+ * window, then asserts on the captured state.
+ */
+
+include aunit;
+include fxgl;
+include testfx;
+include cannon;
+
+@Test(name = "Cannon -- FXGL game port")
+class cannonTest : test {
+    /* The CannonApp under test. */
+    public game = null;
+    /* The fxglApp owning the test game loop. */
+    public app = null;
+
+    /* Driving window. */
+    public elapsed = 0.0;
+    public capturedFirst = false;
+
+    /* Captured state. */
+    public cannonIsCannonType = false;
+    public cannonX = -999.0;
+    public initialCannonY = 0.0;
+    public finalCannonY = 0.0;
+    public scoreAtStart = -1;
+    public scoreTextExists = false;
+    public entityCountBeforeBullet = 0;
+    public entityCountAfterBullet = 0;
+    public finalScore = -1;
+
+    /**
+     * Launches the headless game using CannonApp's own lifecycle wiring,
+     * then overrides onUpdate with a driving callback.
+     */
+    @Before
+    public runBefore() {
+        testfx.setHeadless(true);
+        this.game = new CannonApp();
+        this.app = this.game.build("Cannon Test");
+        this.app.onUpdate(::onUpdate);
+        this.app.launch();
+    }
+
+    /**
+     * On the first frame, captures world/cannon/score state and spawns a
+     * bullet aimed straight down at the ground strip. Tracks the bobbing
+     * cannon every frame, then records the score and exits.
+     * @p tpf is the per-frame time in seconds.
+     */
+    public onUpdate(tpf) {
+        this.elapsed = this.elapsed + tpf;
+        if (this.capturedFirst == false) {
+            this.capturedFirst = true;
+            this.cannonIsCannonType = this.game.cannon.isType("CANNON");
+            this.cannonX = this.game.cannon.getX();
+            this.initialCannonY = this.game.cannon.getY();
+            this.finalCannonY = this.initialCannonY;
+            this.scoreAtStart = this.game.score;
+            this.scoreTextExists = (this.game.scoreText != null);
+            this.entityCountBeforeBullet = this.game.world.getEntityCount();
+            // x=600 sits in the gap between the barriers and over the
+            // ground strip (x 500..800); falling from y=300 it reaches
+            // the ground at y=600.
+            this.game.spawnBullet(600.0, 300.0, 0.0, 800.0);
+            this.entityCountAfterBullet = this.game.world.getEntityCount();
+        }
+        this.finalCannonY = this.game.cannon.getY();
+        if (this.elapsed > 1.5) {
+            this.finalScore = this.game.score;
+            this.app.exit();
+        }
+    }
+
+    /*
+     * Assertions
+     */
+
+    @Test(name = "(world) at least the cannon, two barriers, and ground spawned.")
+    public worldEntityCount() {
+        return this.expect(this.entityCountBeforeBullet >= 4, true);
+    }
+
+    @Test(name = "(cannon) entity carries the CANNON type tag.")
+    public cannonType() {
+        return this.expect(this.cannonIsCannonType, true);
+    }
+
+    @Test(name = "(cannon) spawns at the left edge x=50.")
+    public cannonPosition() {
+        return this.expect(this.cannonX, 50.0);
+    }
+
+    @Test(name = "(cannon) LiftComponent bobs the cannon over time.")
+    public cannonBobs() {
+        delta = this.finalCannonY - this.initialCannonY;
+        if (delta < 0.0) { delta = 0.0 - delta; }
+        return this.expect(delta > 5.0, true);
+    }
+
+    @Test(name = "(shoot) spawning a bullet adds one entity to the world.")
+    public bulletSpawns() {
+        return this.expect(this.entityCountAfterBullet, this.entityCountBeforeBullet + 1);
+    }
+
+    @Test(name = "(score) starts at zero.")
+    public scoreStartsZero() {
+        return this.expect(this.scoreAtStart, 0);
+    }
+
+    @Test(name = "(ui) score readout node was created.")
+    public scoreReadout() {
+        return this.expect(this.scoreTextExists, true);
+    }
+
+    @Test(name = "(score) a bullet landing on the ground scores 1000.")
+    public collisionScores() {
+        return this.expect(this.finalScore, 1000);
+    }
+}
