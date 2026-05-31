@@ -22,7 +22,8 @@ include fxgl.Entity;
 include fxgl.GameSettings;
 include fxgl.GameWorld;
 include fxgl.GameScene;
-include fxgl.Component;
+include fxgl.ExpireCleanComponent;
+include fxgl.LiftComponent;
 include fxgl.PhysicsComponent;
 include fxgl.PhysicsWorld;
 include fxgl.CollidableComponent;
@@ -32,91 +33,33 @@ include fxgl.Input;
 include fxgl.Vec2;
 
 /**
- * Bobs an entity up and down along the Y axis at a fixed speed,
- * reversing direction each time it travels the configured range. Driven
- * by a Component attached to the entity.
- */
-class Lift {
-    /** The entity being moved. */
-    public entity = null;
-    /** The driving Component. */
-    public comp = null;
-    /** Travel speed in pixels per second. */
-    public speed = 150.0;
-    /** Distance traveled before reversing, in pixels. */
-    public range = 150.0;
-    /** Whether the entity is currently moving up. */
-    public goingUp = true;
-    /** Distance traveled in the current direction. */
-    public traveled = 0.0;
-
-    /**
-     * Builds a Component that bobs the given entity.
-     * @p EntityObj is the Entity wrapper to move.
-     */
-    public Lift(object EntityObj) {
-        this.entity = EntityObj;
-        this.comp = new Component();
-        this.comp.onUpdate(::onUpdate);
-    }
-
-    /**
-     * Moves the entity one frame's worth and reverses at the range edge.
-     * @p tpf is the per-frame time in seconds.
-     */
-    public onUpdate(tpf) {
-        step = this.speed * tpf;
-        if (this.goingUp) {
-            this.entity.translate(0.0, 0.0 - step);
-        } else {
-            this.entity.translate(0.0, step);
-        }
-        this.traveled = this.traveled + step;
-        if (this.traveled >= this.range) {
-            this.traveled = 0.0;
-            this.goingUp = (this.goingUp == false);
-        }
-    }
-}
-
-/**
  * Drives a single bullet: applies the launch velocity once the physics
- * body has been created, and removes the bullet after four seconds.
+ * body has been created. Expiry is handled by an `ExpireCleanComponent`
+ * attached separately to the bullet entity.
  */
 class Bullet {
-    /** The bullet entity. */
-    public entity = null;
     /** The bullet's PhysicsComponent. */
     public physics = null;
-    /** The expiry Component. */
-    public expire = null;
     /** Launch velocity X in pixels per second. */
     public vx = 0.0;
     /** Launch velocity Y in pixels per second. */
     public vy = 0.0;
-    /** Seconds elapsed since the bullet was added. */
-    public age = 0.0;
 
     /**
-     * Builds a dynamic-body PhysicsComponent and an expiry Component.
-     * The launch velocity is applied as soon as the physics body is
-     * created via onPhysicsInitialized.
+     * Builds a dynamic-body PhysicsComponent. The launch velocity is
+     * applied as soon as the physics body is created via
+     * onPhysicsInitialized.
      * @p Vx is the launch velocity X in pixels per second.
      * @p Vy is the launch velocity Y in pixels per second.
-     * @p EntityObj is the bullet Entity wrapper.
      */
-    public Bullet(double Vx, double Vy, object EntityObj) {
+    public Bullet(double Vx, double Vy) {
         this.vx = Vx;
         this.vy = Vy;
-        this.entity = EntityObj;
 
         this.physics = new PhysicsComponent();
         this.physics.setBodyType("DYNAMIC");
         this.physics.setDensity(0.05);
         this.physics.onPhysicsInitialized(::applyVelocity);
-
-        this.expire = new Component();
-        this.expire.onUpdate(::tick);
     }
 
     /**
@@ -125,17 +68,6 @@ class Bullet {
      */
     public applyVelocity() {
         this.physics.setLinearVelocity(this.vx, this.vy);
-    }
-
-    /**
-     * Accumulates age and removes the bullet after four seconds.
-     * @p tpf is the per-frame time in seconds.
-     */
-    public tick(tpf) {
-        this.age = this.age + tpf;
-        if (this.age > 4.0) {
-            this.entity.removeFromWorld();
-        }
     }
 }
 
@@ -158,8 +90,6 @@ class CannonApp {
     public input = null;
     /** The cannon Entity wrapper. */
     public cannon = null;
-    /** The cannon's bobbing controller. */
-    public cannonLift = null;
     /** The score Text wrapper. */
     public scoreText = null;
     /** The current score. */
@@ -221,40 +151,14 @@ class CannonApp {
     public onInitGame() {
         this.world = fxgl.getGameWorld();
         this.score = 0;
-        this.initScreenBounds();
+        fxgl.buildScreenBoundsAndAttach(100.0);
         this.initCannon();
         this.initBasket();
     }
 
     /**
-     * Builds four solid, invisible walls around the screen edges so
-     * bullets stay in play.
-     */
-    public initScreenBounds() {
-        this.spawnWall(0.0 - 100.0, 0.0, 100.0, this.height);
-        this.spawnWall(this.width, 0.0, 100.0, this.height);
-        this.spawnWall(0.0, 0.0 - 100.0, this.width, 100.0);
-        this.spawnWall(0.0, this.height, this.width, 100.0);
-    }
-
-    /**
-     * Spawns one invisible, solid wall.
-     * @p X is the wall X position.
-     * @p Y is the wall Y position.
-     * @p W is the wall width.
-     * @p H is the wall height.
-     */
-    public spawnWall(double X, double Y, double W, double H) {
-        e = new Entity();
-        e.setType("WALL");
-        e.setPosition(X, Y);
-        e.addBoundingBox(W, H);
-        e.addComponent(new PhysicsComponent());
-        this.world.addEntity(e);
-    }
-
-    /**
-     * Spawns the cannon: a brown box on the left that bobs up and down.
+     * Spawns the cannon: a brown box on the left that bobs up and down
+     * via a LiftComponent.
      */
     public initCannon() {
         this.cannon = new Entity();
@@ -262,8 +166,9 @@ class CannonApp {
         this.cannon.setPosition(50.0, this.height - 300.0);
         this.addRectView(this.cannon, 70.0, 30.0, new Color("#A52A2A"));
 
-        this.cannonLift = new Lift(this.cannon);
-        this.cannon.addComponent(this.cannonLift.comp);
+        lift = new LiftComponent();
+        lift.yAxisSpeedDuration(150.0, 1.0);
+        this.cannon.addComponent(lift);
 
         this.world.addEntity(this.cannon);
     }
@@ -325,8 +230,9 @@ class CannonApp {
 
     /**
      * Spawns a blue bullet with the given start position and velocity.
-     * The bullet is collidable and has a dynamic physics body driven by a
-     * Bullet controller.
+     * The bullet is collidable, has a dynamic physics body driven by a
+     * Bullet controller, and removes itself after four seconds via an
+     * ExpireCleanComponent.
      * @p StartX is the spawn X position.
      * @p StartY is the spawn Y position.
      * @p Vx is the launch velocity X in pixels per second.
@@ -341,9 +247,9 @@ class CannonApp {
         e.addBoundingBox(25.0, 25.0);
         e.addComponent(new CollidableComponent(true));
 
-        ball = new Bullet(Vx, Vy, e);
+        ball = new Bullet(Vx, Vy);
         e.addComponent(ball.physics);
-        e.addComponent(ball.expire);
+        e.addComponent(new ExpireCleanComponent(4.0));
         this.bullets.add(ball);
 
         this.world.addEntity(e);
@@ -356,7 +262,6 @@ class CannonApp {
     public onInitPhysics() {
         handler = new CollisionHandler("BULLET", "BASKET");
         handler.onCollisionBegin(::onBulletHitBasket);
-
         fxgl.getPhysicsWorld().addCollisionHandler(handler);
     }
 

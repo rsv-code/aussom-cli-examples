@@ -1,0 +1,196 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Ported to Aussom from the FXGLGames "Shooter" demo by
+ * Almas Baimagambetov, available at
+ * https://github.com/AlmasB/FXGLGames and used here under the MIT
+ * License. The original game and the FXGL engine are
+ * Copyright (c) 2015 AlmasB (almaslvl@gmail.com).
+ *
+ * Game:
+ * Red enemies spawn at random positions in the upper half of the
+ * screen, up to a fixed cap. Clicking the left mouse button fires a
+ * small blue bullet straight up from the cursor's X. A bullet that hits
+ * an enemy removes both, decrementing the active enemy count and
+ * letting another spawn slot open.
+ */
+
+include fx;
+include fx.Rectangle;
+include fx.Color;
+include fxgl;
+include fxgl.Entity;
+include fxgl.GameWorld;
+include fxgl.GameSettings;
+include fxgl.PhysicsWorld;
+include fxgl.CollidableComponent;
+include fxgl.CollisionHandler;
+include fxgl.ProjectileComponent;
+include fxgl.UserAction;
+include fxgl.Input;
+include fxgl.Timer;
+include fxgl.FXGLMath;
+
+/**
+ * The Shooter game application. Wires the FXGL lifecycle, handles input
+ * and collision, and keeps the active enemy count bounded.
+ */
+class ShooterApp {
+    /** Game window width in pixels. */
+    public width = 800;
+    /** Game window height in pixels. */
+    public height = 600;
+    /** Maximum number of concurrent enemies. */
+    public maxEnemies = 5;
+    /** Bullet upward speed in pixels per second. */
+    public bulletSpeed = 300.0;
+
+    /** The fxglApp returned by fxgl.gameApp. */
+    public app = null;
+    /** The running game's GameWorld wrapper. */
+    public world = null;
+    /** The running game's Input wrapper. */
+    public input = null;
+    /** The running game's Timer wrapper. */
+    public timer = null;
+    /** Number of active enemies. */
+    public enemies = 0;
+
+    /**
+     * The app entry point. Configures the lifecycle callbacks and
+     * launches the game in standalone mode.
+     * @p args is a list of command line arguments.
+     */
+    public main(args) {
+        this.build("Shooter");
+        this.app.launch();
+    }
+
+    /**
+     * Creates the fxglApp and registers the game's lifecycle callbacks
+     * without launching. Tests use this to attach a driving onUpdate
+     * before calling launch.
+     * @p Title is the game window title.
+     * @r The configured fxglApp.
+     */
+    public build(string Title) {
+        this.app = fxgl.gameApp(Title, this.width, this.height);
+        this.app.onInitSettings(::onInitSettings);
+        this.app.onInitInput(::onInitInput);
+        this.app.onInitGame(::onInitGame);
+        this.app.onInitPhysics(::onInitPhysics);
+        return this.app;
+    }
+
+    /**
+     * Disables FXGL's filesystem writes (the `logs/` and `system/`
+     * directories it would otherwise create in the working directory).
+     * @p Settings is the GameSettings wrapper.
+     */
+    public onInitSettings(object Settings) {
+        Settings.setFileSystemWriteAllowed(false);
+        Settings.setUserProfileEnabled(false);
+    }
+
+    /**
+     * Binds the left mouse button to the shoot action.
+     */
+    public onInitInput() {
+        this.input = fxgl.getInput();
+        action = new UserAction("Shoot");
+        action.onActionBegin(::shoot);
+        this.input.addActionMouse(action, "PRIMARY");
+    }
+
+    /**
+     * Initializes the world, the enemy counter, and the wave timer that
+     * keeps enemies trickling onto the screen.
+     */
+    public onInitGame() {
+        this.world = fxgl.getGameWorld();
+        this.enemies = 0;
+        this.timer = fxgl.getGameTimer();
+        this.timer.runAtInterval(::trySpawnEnemy, 1.0);
+    }
+
+    /**
+     * Registers the bullet/enemy collision handler.
+     */
+    public onInitPhysics() {
+        handler = new CollisionHandler("BULLET", "ENEMY");
+        handler.onCollisionBegin(::onBulletHitEnemy);
+        fxgl.getPhysicsWorld().addCollisionHandler(handler);
+    }
+
+    /**
+     * Removes both colliding entities and decrements the enemy count.
+     * @p BulletEntity is the bullet Entity wrapper.
+     * @p EnemyEntity is the enemy Entity wrapper.
+     */
+    public onBulletHitEnemy(object BulletEntity, object EnemyEntity) {
+        BulletEntity.removeFromWorld();
+        EnemyEntity.removeFromWorld();
+        this.enemies = this.enemies - 1;
+    }
+
+    /**
+     * Wave timer callback. Spawns one enemy at a random position in the
+     * upper half of the screen when the cap is not yet reached.
+     */
+    public trySpawnEnemy() {
+        if (this.enemies < this.maxEnemies) {
+            x = FXGLMath.randomDouble(0.0, fxgl.getAppWidth() - 40.0);
+            y = FXGLMath.randomDouble(0.0, fxgl.getAppHeight() / 2.0 - 40.0);
+            this.spawnEnemy(x, y);
+            this.enemies = this.enemies + 1;
+        }
+    }
+
+    /**
+     * Spawns a single red enemy entity. Caller manages the enemy count.
+     * @p X is the spawn X position.
+     * @p Y is the spawn Y position.
+     * @r The enemy Entity wrapper.
+     */
+    public spawnEnemy(double X, double Y) {
+        e = new Entity();
+        e.setType("ENEMY");
+        e.setPosition(X, Y);
+        rect = new Rectangle(0.0, 0.0, 40.0, 40.0);
+        rect.setFill(new Color("#FF0000"));
+        e.addViewNode(rect);
+        e.addBoundingBox(40.0, 40.0);
+        e.addComponent(new CollidableComponent(true));
+        this.world.addEntity(e);
+        return e;
+    }
+
+    /**
+     * Fires a bullet straight up from the mouse cursor's X position.
+     */
+    public shoot() {
+        x = this.input.getMouseXWorld();
+        y = fxgl.getAppHeight() - 10.0;
+        this.spawnBullet(x, y);
+    }
+
+    /**
+     * Spawns a single blue bullet that moves straight up from (X, Y).
+     * @p X is the spawn X position.
+     * @p Y is the spawn Y position.
+     * @r The bullet Entity wrapper.
+     */
+    public spawnBullet(double X, double Y) {
+        e = new Entity();
+        e.setType("BULLET");
+        e.setPosition(X, Y);
+        rect = new Rectangle(0.0, 0.0, 10.0, 2.0);
+        rect.setFill(new Color("#0000FF"));
+        e.addViewNode(rect);
+        e.addBoundingBox(10.0, 2.0);
+        e.addComponent(new CollidableComponent(true));
+        e.addComponent(new ProjectileComponent(0.0, 0.0 - 1.0, this.bulletSpeed));
+        this.world.addEntity(e);
+        return e;
+    }
+}

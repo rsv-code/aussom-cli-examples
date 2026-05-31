@@ -1,0 +1,116 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * TestFX-driven verification for the Aussom port of the FXGLGames
+ * "Shooter" demo. The suite launches a real headless FXGL game using
+ * ShooterApp's own lifecycle wiring, drives the game loop for a short
+ * window, and asserts on the captured state.
+ */
+
+include aunit;
+include fxgl;
+include testfx;
+include shooter;
+
+@Test(name = "Shooter -- FXGL game port")
+class shooterTest : test {
+    /* The ShooterApp under test. */
+    public game = null;
+    /* The fxglApp owning the test game loop. */
+    public app = null;
+
+    /* Driving window. */
+    public elapsed = 0.0;
+    public capturedFirst = false;
+    public capturedAfterCollision = false;
+
+    /* Captured state. */
+    public startEnemies = -1;
+    public startCount = -1;
+    public countAfterEnemy = -1;
+    public countAfterBullet = -1;
+    public enemiesAfterCollision = -1;
+    public enemiesAtExit = -1;
+
+    /**
+     * Launches the headless game using ShooterApp's own lifecycle wiring,
+     * then overrides onUpdate with a driving callback.
+     */
+    @Before
+    public runBefore() {
+        testfx.setHeadless(true);
+        this.game = new ShooterApp();
+        this.app = this.game.build("Shooter Test");
+        this.app.onUpdate(::onUpdate);
+        this.app.launch();
+    }
+
+    /**
+     * Drives the game loop:
+     *  - first frame: capture baseline, spawn an enemy and place a bullet
+     *    below it so the upward-moving bullet flies through the enemy and
+     *    triggers the collision handler
+     *  - around 0.5s: capture the enemy count (collision should have
+     *    happened, timer should not have fired yet at 1s interval)
+     *  - at 1.5s: capture the final count (timer should have fired) and
+     *    exit
+     * @p tpf is the per-frame time in seconds.
+     */
+    public onUpdate(tpf) {
+        this.elapsed = this.elapsed + tpf;
+
+        if (this.capturedFirst == false) {
+            this.capturedFirst = true;
+            this.startEnemies = this.game.enemies;
+            this.startCount = this.game.world.getEntityCount();
+
+            // Enemy sits at y=100..140; bullet starts 100 px below and
+            // flies straight up through it.
+            this.game.spawnEnemy(200.0, 100.0);
+            this.game.enemies = this.game.enemies + 1;
+            this.countAfterEnemy = this.game.world.getEntityCount();
+
+            this.game.spawnBullet(200.0, 200.0);
+            this.countAfterBullet = this.game.world.getEntityCount();
+        }
+
+        if (this.capturedAfterCollision == false && this.elapsed > 0.5) {
+            this.capturedAfterCollision = true;
+            this.enemiesAfterCollision = this.game.enemies;
+        }
+
+        if (this.elapsed > 1.5) {
+            this.enemiesAtExit = this.game.enemies;
+            this.app.exit();
+        }
+    }
+
+    /*
+     * Assertions
+     */
+
+    @Test(name = "(start) enemies counter starts at zero.")
+    public startZero() {
+        return this.expect(this.startEnemies, 0);
+    }
+
+    @Test(name = "(spawn) spawning an enemy adds one entity to the world.")
+    public spawnEnemyAdds() {
+        return this.expect(this.countAfterEnemy, this.startCount + 1);
+    }
+
+    @Test(name = "(spawn) spawning a bullet adds one entity to the world.")
+    public spawnBulletAdds() {
+        return this.expect(this.countAfterBullet, this.startCount + 2);
+    }
+
+    @Test(name = "(collision) bullet/enemy collision decrements the enemy count.")
+    public collisionDecrements() {
+        return this.expect(this.enemiesAfterCollision, 0);
+    }
+
+    @Test(name = "(timer) wave timer spawns at least one enemy.")
+    public timerSpawns() {
+        return this.expect(this.enemiesAtExit >= 1, true);
+    }
+}
