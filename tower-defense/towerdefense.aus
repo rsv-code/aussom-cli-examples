@@ -1,0 +1,976 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Tower Defense game application — ported from the FXGLGames
+ * "TowerDefense" demo by Almas Baimagambetov, available at
+ * https://github.com/AlmasB/FXGLGames and used here under the MIT
+ * License. The original game and the FXGL engine are
+ * Copyright (c) 2015 AlmasB (almaslvl@gmail.com).
+ *
+ * Game flow:
+ *  - Loads `assets/levels/level1.json` for the wave / tower / map data.
+ *  - Loads `assets/levels/tmx/td1.tmx` via TMXLevelLoader with a factory
+ *    that spawns waypoint + towerBase entities for the Tiled object
+ *    layer.
+ *  - Picks the way entity matching the current wave, builds an Aussom
+ *    `Way` from its polyline, and walks enemies along it through
+ *    EnemyController.
+ *  - Clicking a tower base places `tower1` if the player can afford it.
+ *  - Towers auto-target the nearest enemy in range; bullets damage
+ *    enemies via their EnemyController.hp wrapper.
+ */
+
+include fxgl;
+include fxgl.GameSettings;
+include fxgl.GameWorld;
+include fxgl.GameScene;
+include fxgl.Entity;
+include fxgl.EntityFactory;
+include fxgl.SpawnData;
+include fxgl.TMXLevelLoader;
+include fxgl.CollidableComponent;
+include fxgl.HealthIntComponent;
+include fxgl.EffectComponent;
+include fxgl.FXGLAssetLoaderService;
+include fxgl.Input;
+include fxgl.UserAction;
+include fxgl.Texture;
+include fxgl.Timer;
+include fxgl.ViewComponent;
+include fxgl.FXGLMath;
+include fxgl.AutoRotationComponent;
+include fxgl.TimeComponent;
+include fxgl.AnimationBuilder;
+include fxgl.Bindings;
+include fxgl.Interpolators;
+include fxgl.DialogService;
+include fxgl.GameController;
+include fxgl.PropertyMap;
+include fx.Rectangle;
+include fx.Color;
+include fx.Text;
+include file;
+include data;
+include buffs;
+include components;
+include ui;
+include menus;
+include animations;
+
+/**
+ * The Tower Defense game application.
+ */
+class TowerDefenseApp {
+    /** Window width (25 tiles * 64 px). */
+    public width = 1600;
+    /** Window height (14 tiles * 64 px). */
+    public height = 896;
+
+    /** The fxglApp returned by fxgl.gameApp. */
+    public app = null;
+    /** Running game's GameWorld wrapper. */
+    public world = null;
+    /** Running game's Input wrapper. */
+    public input = null;
+    /** Entity factory used by the TMX loader. */
+    public factory = null;
+    /** Absolute path to the project directory (for file:// URLs). */
+    public cwd = "";
+    /** FXGLAssetLoaderService wrapper for loading textures from disk. */
+    public assets = null;
+
+    /** The active LevelData. */
+    public level = null;
+    /** All TowerData entries loaded from /assets/towers/. */
+    public towerCatalog = [];
+
+    /** Spawn queue used by the wave timer. */
+    public pendingSpawns = [];
+    /** Active TimerAction for the running wave (null when not spawning). */
+    public spawnTimer = null;
+
+    /** Active EnemyControllers. */
+    public enemies = [];
+    /** Active TowerControllers. */
+    public towers = [];
+    /** Active BulletControllers (keeps the wrappers reachable). */
+    public bullets = [];
+
+    /** HUD icon widgets. */
+    public moneyIcon = null;
+    public hpIcon = null;
+    public waveIcon = null;
+    public enemiesIcon = null;
+
+    /** Tower selection box (shown when an empty base is clicked). */
+    public towerSelectionBox = null;
+    /** Tower sell box (shown when a placed tower's base is clicked). */
+    public towerSellBox = null;
+
+    /** When true, the main + game menus are wired through the
+     *  custom SceneFactory; otherwise menus are disabled so the
+     *  test driver can launch straight into onInitGame. */
+    public enableMenus = false;
+
+    /** Name of the level file under `assets/levels/` to load on
+     *  the next onInitGame. The main menu writes this before
+     *  calling startNewGame. */
+    public selectedLevelName = "level1.json";
+
+    /** Extra stylesheets appended to FXGL's defaults at init.
+     *  The original Java does `settings.getCSSList().add("main.css")`
+     *  to keep FXGL's `fxgl_dark.css` (which styles FXGLButton,
+     *  dialog OK buttons, etc.) and only add the project sheet. */
+    public extraCssPaths = ["main.css"];
+
+    /**
+     * The app entry point.
+     * @p args is the command-line argument list.
+     */
+    public main(args) {
+        this.enableMenus = true;
+        this.build("FXGL Tower Defense");
+        this.app.launch();
+    }
+
+    /**
+     * Builds the fxglApp and registers lifecycle callbacks without
+     * launching. Tests use this to attach a driving onUpdate.
+     * @p Title is the window title.
+     * @r The fxglApp wrapper.
+     */
+    public build(string Title) {
+        this.app = fxgl.gameApp(Title, this.width, this.height);
+        this.app.onInitSettings(::onInitSettings);
+        this.app.onInitInput(::onInitInput);
+        this.app.onInitGame(::onInitGame);
+        this.app.onInitUI(::onInitUI);
+        return this.app;
+    }
+
+    /**
+     * Configures GameSettings: disables menus + filesystem writes for
+     * the MVP slice.
+     * @p Settings is the GameSettings wrapper.
+     */
+    public onInitSettings(object Settings) {
+        Settings.setVersion("0.4");
+        Settings.setFileSystemWriteAllowed(false);
+        Settings.setUserProfileEnabled(false);
+        Settings.setIntroEnabled(false);
+        // Mirror the original `settings.getCSSList().add("main.css")`
+        // so FXGL's bundled `fxgl_dark.css` stays loaded.
+        cssList = Settings.getCssList();
+        for (p : this.extraCssPaths) { cssList.invoke("add", p); }
+        Settings.setApplicationMode("DEVELOPER");
+        Settings.addAussomEngineService("CurrencyService");
+        if (this.enableMenus) {
+            Settings.setMainMenuEnabled(true);
+            Settings.setGameMenuEnabled(true);
+            sf = new TDSceneFactory(this);
+            Settings.setSceneFactory(sf.factory);
+        } else {
+            Settings.setMainMenuEnabled(false);
+            Settings.setGameMenuEnabled(false);
+        }
+    }
+
+    /**
+     * Captures the running Input wrapper for later mouse-position
+     * lookups. Click handlers are installed per tower-base entity by
+     * the factory.
+     */
+    public onInitInput() {
+        this.input = fxgl.getInput();
+
+        // Developer cheat key: clear all enemies, expire any queued
+        // spawns, refund the current wave's would-be reward as money,
+        // and zero the on-screen enemy count. Mirrors the original
+        // initInput's onKeyDown(KeyCode.L, ...).
+        cheat = new UserAction("Skip Wave");
+        cheat.onActionBegin(::onSkipWave);
+        this.input.addActionKey(cheat, "L");
+    }
+
+    /**
+     * Cheat-key action handler -- wipes enemies, expires the spawn
+     * timer, refunds the unspawned wave's reward.
+     */
+    public onSkipWave() {
+        for (e : this.world.getEntitiesByType(["ENEMY"])) {
+            e.removeFromWorld();
+        }
+        if (this.spawnTimer != null) {
+            this.spawnTimer.expire();
+            this.spawnTimer = null;
+        }
+        this.pendingSpawns = [];
+        wave = fxgl.geti("currentWave");
+        for (w : this.level.wavesAt(wave)) {
+            enemyData = Data.loadEnemy(w.enemy);
+            reward = enemyData.reward * w.amount;
+            fxgl.set("money", fxgl.geti("money") + reward);
+        }
+        fxgl.set("numEnemies", 0);
+    }
+
+    /**
+     * Initializes the level: loads data files, registers the entity
+     * factory, loads the TMX map, and schedules the first wave.
+     */
+    public onInitGame() {
+        this.cwd = file.getCanonicalPath(".");
+        this.world = fxgl.getGameWorld();
+        this.assets = new FXGLAssetLoaderService();
+        this.assets.obj = fxgl.getAssetLoader();
+
+        // Mirror initGameVars: register the keys with initial values
+        // BEFORE attaching listeners (FXGL's PropertyMap.addListener
+        // NPEs on an unknown key).
+        this.towerCatalog = [];
+        for (n : ["tower1.json", "tower2.json", "tower3.json", "tower4.json", "tower5.json", "tower6.json"]) {
+            this.towerCatalog.add(Data.loadTower(n));
+        }
+        this.level = Data.loadLevel(this.selectedLevelName);
+
+        fxgl.set("money", this.level.startMoney);
+        fxgl.set("playerHP", Config.STARTING_HP());
+        fxgl.set("currentWave", 0);
+        fxgl.set("numEnemies", 0);
+        fxgl.set("numTowers", 0);
+
+        worldProps = fxgl.getWorldProperties();
+        worldProps.addKeyListener("numEnemies", ::onNumEnemiesChanged);
+        worldProps.addKeyListener("playerHP", ::onPlayerHpChanged);
+        worldProps.addKeyListener("currentWave", ::onCurrentWaveChanged);
+        worldProps.addKeyListener("money", ::onMoneyChanged);
+
+        this.factory = fxgl.entityFactory();
+        this.factory.addSpawner("waypoint", ::makeWaypoint);
+        this.factory.addSpawner("towerBase", ::makeTowerBase);
+        this.factory.attachTo(this.world);
+
+        this.moneyIcon = new MoneyIcon(this);
+        this.hpIcon = new HPIcon(this);
+        this.enemiesIcon = new EnemiesIcon(this);
+        this.waveIcon = new WaveIcon(this);
+        this.towerSelectionBox = new TowerSelectionBox(this, this.towerCatalog);
+        this.towerSellBox = new TowerSellBox(this);
+
+        loader = new TMXLevelLoader();
+        lvl = loader.load("file://" + this.cwd + "/assets/levels/tmx/" + this.level.map, this.world);
+        this.world.setLevel(lvl);
+
+        // Match the original: every TiledMapLayer entity gets a
+        // click handler that hides the tower selection box, so
+        // clicking the map (off any tower base) dismisses it. The
+        // entity type used by FXGL's TMX loader is the string
+        // "TiledMapLayer"; route through getEntitiesByType.
+        try {
+            for (e : this.world.getEntitiesByType(["TiledMapLayer"])) {
+                vc = new ViewComponent();
+                vc.obj = e.getViewComponent();
+                vc.addOnClickHandler(::onMapClicked);
+            }
+        } catch (e) {
+            c.log("[TD] tilemap click wire failed: " + e);
+        }
+
+        this.waveIcon.setMaxWave(this.level.maxWaveIndex());
+        this.scheduleNextWave();
+    }
+
+    /** Map-tile click handler: dismiss the open selection box. */
+    public onMapClicked(object Event) {
+        if (this.towerSelectionBox != null) {
+            this.towerSelectionBox.root.setVisible(false);
+        }
+    }
+
+    /**
+     * Tower-view click handler. The original guards against re-opening
+     * the sell box while the tower's despawn animation is playing
+     * by reading the entity's `isDespawning` flag.
+     *
+     * Aussom callbacks don't capture extra args, so the tower remembers
+     * its originating cell as the `cell` property; we walk the live
+     * tower list to find which one was clicked (via mouse-world
+     * coords, same trick as `onCellClick`).
+     * @p Event is the JavaFX MouseEvent AJO.
+     */
+    public onTowerClick(object Event) {
+        mx = this.input.getMouseXWorld();
+        my = this.input.getMouseYWorld();
+        for (t : this.towers) {
+            if (t.entity == null) { continue; }
+            tx = t.entity.getX();
+            ty = t.entity.getY();
+            if (mx >= tx && mx < tx + 64.0 && my >= ty && my < ty + 64.0) {
+                if (t.entity.getProperties().getBoolean("isDespawning")) {
+                    return null;
+                }
+                cell = t.entity.getProperties().getValue("cell");
+                if (cell != null) { this.onCellClicked(cell); }
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Wave-end listener: when the on-screen enemy count drops to
+     * zero with no pending spawns and no spawn timer, run the
+     * wave-end flow (reward + scheduleNext or gameOver).
+     * @p Old is the previous count.
+     * @p New is the new count.
+     */
+    public onNumEnemiesChanged(Old, New) {
+        if (New == 0 && this.pendingSpawns.size() == 0 && this.spawnTimer == null) {
+            this.onWaveEnd();
+        }
+    }
+
+    /**
+     * HP listener: when HP reaches zero, end the game.
+     * @p Old is the previous HP.
+     * @p New is the new HP.
+     */
+    public onPlayerHpChanged(Old, New) {
+        if (New <= 0) { this.gameOver(false); }
+    }
+
+    /**
+     * Wave-index listener: kick off the wave-icon animation when
+     * the index changes.
+     */
+    public onCurrentWaveChanged(Old, New) {
+        if (this.waveIcon != null) {
+            Animations.playWaveIconAnimation(this.waveIcon);
+        }
+    }
+
+    /**
+     * Money listener: play the MoneyIcon bounce on every change.
+     */
+    public onMoneyChanged(Old, New) {
+        // Mirror the original: cap at MAX_MONEY whenever it would
+        // exceed. This guards every writer, not just the in-app
+        // call sites that have explicit checks.
+        if (New > Config.MAX_MONEY()) {
+            fxgl.set("money", Config.MAX_MONEY());
+            return null;
+        }
+        if (this.moneyIcon != null && New != Old) {
+            this.moneyIcon.playChangeAnim(New > Old);
+        }
+    }
+
+    /**
+     * Spawn callback for "waypoint" objects in the TMX. Copies the name
+     * and polyline properties off the SpawnData so app code can find
+     * the way later.
+     * @p Data is the SpawnData wrapper provided by the TMX loader.
+     * @r The waypoint Entity.
+     */
+    public makeWaypoint(object Data) {
+        e = new Entity();
+        e.setType("WAY");
+        e.setPosition(Data.getX(), Data.getY());
+        if (Data.hasKey("name")) { e.getProperties().setValue("name", Data.get("name")); }
+        if (Data.hasKey("polyline")) { e.getProperties().setValue("polyline", Data.get("polyline")); }
+        return e;
+    }
+
+    /**
+     * Spawn callback for "towerBase" objects in the TMX. Adds a
+     * translucent green tile and a click handler that places `tower1`.
+     * @p Data is the SpawnData wrapper provided by the TMX loader.
+     * @r The tower-base Entity.
+     */
+    public makeTowerBase(object Data) {
+        e = new Entity();
+        e.setType("TOWER_BASE");
+        e.setPosition(Data.getX(), Data.getY());
+
+        rect = new Rectangle(0.0, 0.0, 64.0, 64.0);
+        rect.setFill(new Color("#008000", 0.25));
+        e.addViewNode(rect);
+        e.addBoundingBox(64.0, 64.0);
+
+        vc = new ViewComponent();
+        vc.obj = e.getViewComponent();
+        vc.addOnClickHandler(::onCellClick);
+
+        // Match the original: the cell fades to DARKGREEN on hover.
+        // The hover is on the view's parent Group (ViewComponent
+        // children are added to a Group); fetching it via
+        // getParent on the rect gives the hover-able node.
+        try {
+            parentNode = rect.obj.invokeRaw("getParent");
+            hoverProp = parentNode.invokeRaw("hoverProperty");
+            hoverFill = Bindings.when(hoverProp)
+                .then(new Color("#006400"))
+                .otherwise(new Color("#008000", 0.25));
+            rect.fillProperty().invoke("bind", hoverFill);
+        } catch (e) {}
+
+        return e;
+    }
+
+    /**
+     * Mouse click handler shared by every tower-base view. Finds which
+     * cell is under the cursor and delegates to onCellClicked.
+     * @p Event is the JavaFX MouseEvent AJO.
+     */
+    public onCellClick(object Event) {
+        mx = this.input.getMouseXWorld();
+        my = this.input.getMouseYWorld();
+        for (cell : this.world.getEntitiesByType(["TOWER_BASE"])) {
+            bx = cell.getX();
+            by = cell.getY();
+            if (mx >= bx && mx < bx + 64.0 && my >= by && my < by + 64.0) {
+                this.onCellClicked(cell);
+                return null;
+            }
+        }
+    }
+
+    /**
+     * Opens either the sell box (if the cell already has a tower) or
+     * the selection box (if the cell is empty), positioned next to the
+     * cell. Mirrors the original `onCellClicked` flow.
+     * @p Cell is the tower-base Entity that was clicked.
+     */
+    public onCellClicked(object Cell) {
+        if (Cell.getProperties().exists("hasTower")) {
+            this.towerSelectionBox.root.setVisible(false);
+            this.towerSellBox.setCell(Cell);
+            this.towerSellBox.root.setVisible(true);
+            x = Cell.getX();
+            if (x > this.width / 2.0) { x = x - 80.0; }
+            this.towerSellBox.root.setTranslateX(x);
+            this.towerSellBox.root.setTranslateY(Cell.getY());
+            return null;
+        }
+        this.towerSellBox.root.setVisible(false);
+        this.towerSelectionBox.setCell(Cell);
+        this.towerSelectionBox.root.setVisible(true);
+        x = Cell.getX();
+        if (x > this.width / 2.0) { x = x - 250.0; }
+        this.towerSelectionBox.root.setTranslateX(x);
+        this.towerSelectionBox.root.setTranslateY(Cell.getY());
+    }
+
+    /**
+     * Called by TowerIcon when the player picks a tower from the
+     * selection box. Spends the money, hides the box, and spawns the
+     * tower on the cell.
+     * @p Cell is the tower-base Entity to build on.
+     * @p Choice is the chosen TowerData.
+     */
+    public onTowerSelected(object Cell, object Choice) {
+        money = fxgl.geti("money");
+        if (money < Choice.cost) { return null; }
+        this.towerSelectionBox.root.setVisible(false);
+        fxgl.set("money", money - Choice.cost);
+        this.updateHud();
+        Cell.getProperties().setValue("hasTower", true);
+        tower = this.spawnTower(Cell, Choice);
+        Cell.getProperties().setValue("tower", tower);
+    }
+
+    /**
+     * Called by SellIcon when the player sells the tower on a cell.
+     * Refunds the configured fraction of the cost, removes the tower
+     * entity, and clears the cell's tower bookkeeping.
+     * @p Cell is the tower-base Entity whose tower is being sold.
+     */
+    public onTowerSold(object Cell) {
+        this.towerSellBox.root.setVisible(false);
+        if (Cell.getProperties().exists("tower") == false) { return null; }
+        tower = Cell.getProperties().getValue("tower");
+
+        refund = FXGLMath.floor(tower.data.cost * Config.COST_REFUND_ON_SALE());
+        fxgl.set("money", fxgl.geti("money") + refund);
+
+        Cell.getProperties().setValue("hasTower", false);
+
+        if (tower.entity != null) {
+            // Match the original: mark the tower as despawning so
+            // its view click handler skips re-opening the sell box
+            // while the scale-out animation runs.
+            tower.entity.getProperties().setValue("isDespawning", true);
+            this.playScaleOut(tower.entity, 0.5, Interpolators.easeOut("EXPONENTIAL"));
+        }
+        kept = [];
+        for (t : this.towers) {
+            if (t != tower) { kept.add(t); }
+        }
+        this.towers = kept;
+        fxgl.set("numTowers", fxgl.geti("numTowers") - 1);
+        this.updateHud();
+    }
+
+    /**
+     * Loads a texture from `assets/textures/<Name>` via a file:// URL so
+     * the FXGL classpath lookup is bypassed.
+     * @p Name is the file name (e.g. "towers/tower1.png").
+     * @r A Texture wrapper.
+     */
+    public loadTex(string Name) {
+        if (this.assets == null) {
+            this.cwd = file.getCanonicalPath(".");
+            this.assets = new FXGLAssetLoaderService();
+            this.assets.obj = fxgl.getAssetLoader();
+        }
+        return this.assets.loadTextureFromUrl("file://" + this.cwd + "/assets/textures/" + Name);
+    }
+
+    /**
+     * Builds the HUD: money, HP, wave, enemies-left icons positioned in
+     * the top-left of the screen, matching the original game's layout.
+     */
+    public onInitUI() {
+        this.towerSelectionBox.root.setVisible(false);
+        this.towerSellBox.root.setVisible(false);
+
+        scene = fxgl.getGameScene();
+        scene.addUINode(this.towerSellBox.root);
+        scene.addUINode(this.towerSelectionBox.root);
+        this.addUINodeAt(this.moneyIcon.root, 10.0, 10.0);
+        this.addUINodeAt(this.hpIcon.root, 10.0, 90.0);
+        this.addUINodeAt(this.waveIcon.root, 10.0, 250.0);
+        this.addUINodeAt(this.enemiesIcon.root, 10.0, 170.0);
+
+        // FXGL's setCssList lookup is classpath-based (`/assets/ui/
+        // css/main.css`) which our file-based asset tree does not
+        // satisfy, so apply the stylesheet directly to the game
+        // scene's content root from the local file URL. The CSS
+        // rules (`.play_button`, `.wave_button`, etc.) attach via
+        // the style classes set on the buttons.
+        try {
+            cssUrl = "file://" + this.cwd + "/assets/ui/css/main.css";
+            contentRoot = scene.obj.invokeRaw("getContentRoot");
+            contentRoot.invokeRaw("getStylesheets").invoke("add", cssUrl);
+        } catch (e) {}
+
+        this.updateHud();
+    }
+
+    /**
+     * Helper that positions a node and adds it to the GameScene UI
+     * overlay. The positioning is done locally via setTranslateX/Y
+     * so the call sites can use a wrapper directly without worrying
+     * which overload of `addUINode` the Java side surfaces.
+     */
+    public addUINodeAt(object Node, double X, double Y) {
+        Node.setTranslateX(X);
+        Node.setTranslateY(Y);
+        fxgl.getGameScene().addUINode(Node);
+    }
+
+    /**
+     * Refreshes the HUD icon labels from world variables.
+     */
+    public updateHud() {
+        // HUD labels are now bound to world properties through
+        // textProperty().bind(...) so no imperative refresh is
+        // needed -- they react to `fxgl.set(...)` automatically.
+    }
+
+    /**
+     * Asks the WaveIcon to display a WAVE_PREP_TIME countdown and
+     * fire `nextWave` when it reaches zero. Matches the original's
+     * waveIcon.scheduleWave hand-off.
+     */
+    public scheduleNextWave() {
+        if (this.waveIcon != null) {
+            this.waveIcon.scheduleWave(Config.WAVE_PREP_TIME(), ::nextWave);
+        } else {
+            this.nextWave();
+        }
+    }
+
+    /**
+     * Advances to the next wave: increments the wave counter, finds
+     * the way entity, builds the Way, and queues the enemy spawns.
+     */
+    public nextWave() {
+        next = fxgl.geti("currentWave") + 1;
+        if (next > this.level.maxWaveIndex()) { return null; }
+        fxgl.set("currentWave", next);
+        this.updateHud();
+
+        for (w : this.level.wavesAt(next)) {
+            wayEntity = this.findWayEntity(w.way);
+            if (wayEntity == null) {
+                c.log("ERROR: no way named " + w.way);
+                return null;
+            }
+            polyline = wayEntity.getObject("polyline");
+            way = Data.wayFromPolyline(polyline, wayEntity.getX(), wayEntity.getY());
+            enemyData = Data.loadEnemy(w.enemy);
+            i = 0;
+            while (i < w.amount) {
+                this.pendingSpawns.add({ way: way, data: enemyData });
+                i = i + 1;
+            }
+            fxgl.set("numEnemies", fxgl.geti("numEnemies") + w.amount);
+            this.updateHud();
+            this.spawnTimer = fxgl.getGameTimer().runAtInterval(::spawnNextEnemy, w.interval);
+        }
+    }
+
+    /**
+     * Wave-end flow: pay out each wave's reward, then either
+     * schedule the next wave or finish the level.
+     */
+    public onWaveEnd() {
+        for (w : this.level.wavesAt(fxgl.geti("currentWave"))) {
+            fxgl.set("money", fxgl.geti("money") + w.reward);
+        }
+        if (fxgl.geti("money") > Config.MAX_MONEY()) {
+            fxgl.set("money", Config.MAX_MONEY());
+        }
+        this.updateHud();
+
+        if (fxgl.geti("currentWave") < this.level.maxWaveIndex()) {
+            this.scheduleNextWave();
+        } else {
+            this.gameOver(true);
+        }
+    }
+
+    /**
+     * Shows the level-complete (or game-over) dialog and returns
+     * to the main menu on dismissal.
+     * @p Won is true when the player cleared all waves, false on
+     *    HP-loss defeat.
+     */
+    public gameOver(bool Won) {
+        if (Won) {
+            this.lastResultWon = true;
+            ds = fxgl.getDialogService();
+            ds.showMessageBox("Level Complete!", ::onLevelCompleteDismissed);
+        } else {
+            this.lastResultWon = false;
+            ds = fxgl.getDialogService();
+            ds.showMessageBox("Game Over", ::onLossDismissed);
+        }
+    }
+
+    /** Test seam: result of the most recent gameOver call. */
+    public lastResultWon = false;
+    /** Test seam: name of the level loaded after dismiss. */
+    public lastAdvancedTo = "";
+
+    /**
+     * Level-complete dismissal callback. Advances to the next level
+     * in `levelNames` if one is available; on the last level the
+     * player goes back to the main menu. Mirrors a player-facing
+     * progression flow on top of the original Java behaviour (which
+     * always returns to main menu).
+     */
+    public onLevelCompleteDismissed() {
+        next = this.nextLevelName(this.selectedLevelName);
+        if (next != null) {
+            this.selectedLevelName = next;
+            this.lastAdvancedTo = next;
+            gc = new GameController();
+            gc.obj = fxgl.getGameController();
+            gc.startNewGame();
+        } else {
+            this.lastAdvancedTo = "main-menu";
+            gc = new GameController();
+            gc.obj = fxgl.getGameController();
+            gc.gotoMainMenu();
+        }
+    }
+
+    /** Loss dismissal callback: back to main menu (no progression). */
+    public onLossDismissed() {
+        this.lastAdvancedTo = "main-menu";
+        gc = new GameController();
+        gc.obj = fxgl.getGameController();
+        gc.gotoMainMenu();
+    }
+
+    /** Ordered list used by `nextLevelName`. */
+    public levelNames = ["level1.json", "level2.json", "level3.json", "level4.json"];
+
+    /**
+     * @p Current is the level just completed (e.g. "level1.json").
+     * @r The next level's file name, or null when on the last level.
+     */
+    public nextLevelName(string Current) {
+        i = 0;
+        while (i < this.levelNames.size()) {
+            if (this.levelNames[i] == Current) {
+                if (i + 1 < this.levelNames.size()) {
+                    return this.levelNames[i + 1];
+                }
+                return null;
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /**
+     * Spawn timer callback: pops the next queued enemy and spawns it.
+     * Stops the timer when the queue is empty.
+     */
+    public spawnNextEnemy() {
+        if (this.pendingSpawns.size() == 0) {
+            if (this.spawnTimer != null) {
+                this.spawnTimer.expire();
+                this.spawnTimer = null;
+            }
+            return null;
+        }
+        next = this.pendingSpawns[0];
+        rest = [];
+        i = 1;
+        while (i < this.pendingSpawns.size()) {
+            rest.add(this.pendingSpawns[i]);
+            i = i + 1;
+        }
+        this.pendingSpawns = rest;
+        this.spawnEnemy(next.way, next.data);
+    }
+
+    /**
+     * Finds the WAY entity whose `name` property matches.
+     * @p Name is the way name to find (e.g. "way1").
+     * @r The Entity wrapper, or null if not found.
+     */
+    public findWayEntity(string Name) {
+        for (e : this.world.getEntitiesByType(["WAY"])) {
+            if (e.getProperties().exists("name")) {
+                if (e.getProperties().getString("name") == Name) { return e; }
+            }
+        }
+        return null;
+    }
+
+    /**
+     * Finds the nearest active EnemyController to the given tower.
+     * @p TowerEntity is the tower's Entity wrapper.
+     * @r The EnemyController, or null when there are no enemies.
+     */
+    public findNearestEnemy(object TowerEntity) {
+        best = null;
+        bestD2 = 0.0;
+        tx = TowerEntity.getX();
+        ty = TowerEntity.getY();
+        for (en : this.enemies) {
+            if (en.entity == null) { } else {
+                if (en.entity.isActive()) {
+                    dx = en.entity.getX() - tx;
+                    dy = en.entity.getY() - ty;
+                    d2 = dx * dx + dy * dy;
+                    if (best == null || d2 < bestD2) {
+                        best = en;
+                        bestD2 = d2;
+                    }
+                }
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Spawns one enemy entity at the start of the given Way.
+     * @p WayObj is the Way to walk.
+     * @p EnemyData is the enemy's stats.
+     * @r The new EnemyController.
+     */
+    public spawnEnemy(object WayObj, object EnemyData) {
+        e = new Entity();
+        e.setType("ENEMY");
+        tex = this.loadTex("enemies/" + EnemyData.imageName);
+        e.addViewNode(tex);
+        e.addBoundingBox(tex.getWidth(), tex.getHeight());
+        // Same center-pivot fix as towers -- enemies use
+        // AutoRotationComponent so they rotate to face their
+        // movement vector and would swing off-anchor otherwise.
+        ecx = tex.getWidth() / 2.0;
+        ecy = tex.getHeight() / 2.0;
+        e.setRotationOrigin(ecx, ecy);
+        e.setScaleOrigin(ecx, ecy);
+        e.addComponent(new CollidableComponent(true));
+        e.addComponent(new TimeComponent(1.0));
+        e.addComponent(new AutoRotationComponent());
+
+        ctrl = new EnemyController(this, WayObj, EnemyData);
+        ctrl.attachTo(e);
+        this.enemies.add(ctrl);
+
+        this.world.addEntity(e);
+        this.playScaleIn(e, 0.45, Interpolators.easeOut("ELASTIC"));
+        return ctrl;
+    }
+
+    /**
+     * Spawns a tower at the cell, with the given TowerData. Adds a
+     * green square placeholder view on top of the cell.
+     * @p Cell is the tower-base Entity.
+     * @p TowerData is the tower's stats.
+     * @r The new TowerController.
+     */
+    public spawnTower(object Cell, object TowerData) {
+        e = new Entity();
+        e.setType("TOWER");
+        e.setPosition(Cell.getX(), Cell.getY());
+        e.getProperties().setValue("isDespawning", false);
+        // Store the originating cell on the tower so the tower's
+        // click handler can route back to it without a per-tower
+        // closure.
+        e.getProperties().setValue("cell", Cell);
+        tex = this.loadTex(TowerData.imageName);
+        e.addViewNode(tex);
+        e.addBoundingBox(tex.getWidth(), tex.getHeight());
+        // FXGL's entityBuilder.bbox(HitBox) auto-syncs the
+        // entity's rotation- and scale-origin to the bbox centre,
+        // so towers built through `viewWithBBox` rotate in place.
+        // The Aussom Entity wrapper's `addBoundingBox` does not
+        // do this, so without setting them by hand the tower's
+        // pivot is its top-left and the sprite swings off the
+        // cell on every shot.
+        cx = tex.getWidth() / 2.0;
+        cy = tex.getHeight() / 2.0;
+        e.setRotationOrigin(cx, cy);
+        e.setScaleOrigin(cx, cy);
+        e.setZIndex(Config.Z_INDEX_TOWER());
+
+        // The tower-side click handler is distinct from the
+        // tower-base handler: it skips firing while the tower is
+        // being despawned (so a click during the sell animation
+        // does not re-open the sell box). Matches the original.
+        vc = new ViewComponent();
+        vc.obj = e.getViewComponent();
+        vc.addOnClickHandler(::onTowerClick);
+
+        parsedEffects = [];
+        for (s : TowerData.effects) { parsedEffects.add(Buffs.parse(s)); }
+
+        ctrl = new TowerController(this, TowerData, parsedEffects);
+        ctrl.attachTo(e);
+        this.towers.add(ctrl);
+
+        this.world.addEntity(e);
+        fxgl.set("numTowers", fxgl.geti("numTowers") + 1);
+        this.playScaleIn(e, 0.85, Interpolators.easeOut("ELASTIC"));
+        return ctrl;
+    }
+
+    /**
+     * Plays an entity scale-in pop, growing from (0,0) to (1,1) over
+     * the given duration. Equivalent to the original's
+     * `spawnWithScale` helper but driven against an already-spawned
+     * entity so direct-construction spawn callers can use it.
+     * @p E is the Entity wrapper.
+     * @p DurationSeconds is the animation length.
+     * @p InterpolatorObj is an AussomJavaObject around an Interpolator.
+     */
+    public playScaleIn(object E, double DurationSeconds, object InterpolatorObj) {
+        b = new AnimationBuilder();
+        b.duration(DurationSeconds);
+        b.interpolator(InterpolatorObj);
+        sa = b.scale([E.obj]);
+        sa.from(0.0, 0.0);
+        sa.to(1.0, 1.0);
+        sa.buildAndPlay();
+    }
+
+    /**
+     * Plays an entity scale-out shrink, ending at (0,0). The entity
+     * is removed from the world automatically when the animation
+     * finishes (`despawnWithScale` semantics).
+     * @p E is the Entity wrapper.
+     * @p DurationSeconds is the animation length.
+     * @p InterpolatorObj is an AussomJavaObject around an Interpolator.
+     */
+    public playScaleOut(object E, double DurationSeconds, object InterpolatorObj) {
+        fxgl.despawnWithScale(E, DurationSeconds, InterpolatorObj);
+    }
+
+    /**
+     * Spawns a bullet at the shooter's position, chasing the target
+     * EnemyController.
+     * @p Shooter is the firing TowerController.
+     * @p Target is the target EnemyController.
+     */
+    public spawnBullet(object Shooter, object Target) {
+        e = new Entity();
+        e.setType("BULLET");
+        e.setPosition(Shooter.entity.getX() + 32.0, Shooter.entity.getY() + 32.0);
+        imgName = Shooter.data.projectileImageName;
+        if (imgName == null) { imgName = "projectile.png"; }
+        tex = this.loadTex(imgName).outline(new Color("#000000"), 2);
+        tex.setRotate(90.0);
+        e.addViewNode(tex);
+        e.addBoundingBox(tex.getWidth(), tex.getHeight());
+        // Bullets use AutoRotationComponent so the sprite rotates
+        // to face its velocity each frame; pivot has to be the
+        // bbox centre or it spirals off course.
+        bcx = tex.getWidth() / 2.0;
+        bcy = tex.getHeight() / 2.0;
+        e.setRotationOrigin(bcx, bcy);
+        e.setScaleOrigin(bcx, bcy);
+        e.setZIndex(Config.Z_INDEX_BULLET());
+        // The original Java bullet has AutoRotationComponent so the
+        // sprite rotates to follow the bullet's velocity vector.
+        e.addComponent(new AutoRotationComponent());
+
+        bc = new BulletController(this, Shooter, Target);
+        bc.attachTo(e);
+        this.bullets.add(bc);
+
+        this.world.addEntity(e);
+        return bc;
+    }
+
+    /**
+     * Called by BulletController when an enemy's HP reaches zero.
+     * Awards money, drops the EnemyController, removes the entity.
+     * @p Enemy is the dying EnemyController.
+     */
+    public killEnemy(object Enemy) {
+        reward = Enemy.data.reward;
+        fxgl.set("money", fxgl.geti("money") + reward);
+        if (fxgl.geti("money") > Config.MAX_MONEY()) {
+            fxgl.set("money", Config.MAX_MONEY());
+        }
+        this.dropEnemy(Enemy);
+        if (Enemy.entity != null) { Enemy.entity.removeFromWorld(); }
+        this.updateHud();
+    }
+
+    /**
+     * Called by EnemyController when an enemy reaches the end of its
+     * path. The player loses one HP.
+     * @p Enemy is the EnemyController that finished walking.
+     */
+    public onEnemyReachedEnd(object Enemy) {
+        fxgl.set("playerHP", fxgl.geti("playerHP") - 1);
+        this.dropEnemy(Enemy);
+        this.updateHud();
+        if (fxgl.geti("playerHP") <= 0) {
+            // game over -- stub for the MVP
+        }
+    }
+
+    /**
+     * Removes an EnemyController from `this.enemies` and decrements
+     * `numEnemies`.
+     * @p Enemy is the EnemyController to drop.
+     */
+    public dropEnemy(object Enemy) {
+        kept = [];
+        for (en : this.enemies) {
+            if (en != Enemy) { kept.add(en); }
+        }
+        this.enemies = kept;
+        fxgl.set("numEnemies", fxgl.geti("numEnemies") - 1);
+    }
+}

@@ -1,0 +1,32 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Visual-effect animations for the Tower Defense port. Mirrors
+ * the original `td.ui.Animations` static helpers.
+ */
+
+include fxgl.AnimationBuilder;
+include fxgl.Interpolators;
+
+/**
+ * Static helpers that build and play one-shot animations.
+ */
+static class Animations {
+    /**
+     * Translates the wave icon out and back in over 1.5 seconds,
+     * repeating twice, to draw attention when the wave counter
+     * changes.
+     * @p Icon is a HudIcon-like wrapper exposing `.root.obj`.
+     */
+    public playWaveIconAnimation(object Icon) {
+        b = new AnimationBuilder();
+        b.duration(1.5);
+        b.interpolator(Interpolators.easeOut("EXPONENTIAL"));
+        b.repeat(2);
+        b.autoReverse(true);
+        sub = b.translate([Icon.root.obj]);
+        sub.from(10.0, 250.0);
+        sub.to(100.0, 250.0);
+        sub.buildAndPlay();
+    }
+}

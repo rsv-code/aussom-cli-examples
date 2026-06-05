@@ -1,0 +1,145 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * TestFX-driven verification for the Aussom port of the FXGLGames
+ * "Tower Defense" demo. The suite launches a real headless FXGL game,
+ * manually spawns one enemy and one tower so the combat path runs
+ * deterministically, drives the loop for ~12 seconds, then asserts on
+ * the captured state.
+ */
+
+include aunit;
+include fxgl;
+include testfx;
+include towerdefense;
+include data;
+
+@Test(name = "Tower Defense -- FXGL game port")
+class towerDefenseTest : test {
+    public game = null;
+    public app = null;
+    public elapsed = 0.0;
+    public phase = 0;
+
+    /* Captured state. */
+    public levelName = "";
+    public maxWave = -1;
+    public wayCount = -1;
+    public baseCount = -1;
+    public moneyStart = -1;
+    public hpStart = -1;
+    public way1Found = false;
+
+    /* Combat fixtures + outcomes. */
+    public manualEnemyCount = -1;
+    public manualTowerCount = -1;
+    public moneyAfterCombat = -1;
+    public enemyDied = false;
+    public hpFinal = -1;
+    public hpStartedDecreasing = false;
+
+    @Before
+    public runBefore() {
+        testfx.setHeadless(true);
+        this.game = new TowerDefenseApp();
+        this.app = this.game.build("TD Test");
+        this.app.onUpdate(::onUpdate);
+        this.app.launch();
+    }
+
+    public onUpdate(tpf) {
+        this.elapsed = this.elapsed + tpf;
+
+        // Phase 1 (after 0.5s): capture initial state + spawn one fixture pair.
+        if (this.phase == 0 && this.elapsed > 0.5) {
+            this.phase = 1;
+            this.levelName = this.game.level.name;
+            this.maxWave = this.game.level.maxWaveIndex();
+            this.wayCount = this.game.world.getEntitiesByType(["WAY"]).size();
+            this.baseCount = this.game.world.getEntitiesByType(["TOWER_BASE"]).size();
+            this.moneyStart = fxgl.geti("money");
+            this.hpStart = fxgl.geti("playerHP");
+
+            wayEntity = this.game.findWayEntity("way1");
+            this.way1Found = (wayEntity != null);
+
+            if (this.way1Found) {
+                // Build a way and spawn one enemy at its start.
+                polyline = wayEntity.getObject("polyline");
+                way = Data.wayFromPolyline(polyline, wayEntity.getX(), wayEntity.getY());
+                enemyData = Data.loadEnemy("enemy1.json");
+                this.game.spawnEnemy(way, enemyData);
+                this.manualEnemyCount = this.game.enemies.size();
+
+                // Drop the strongest available tower on the first base
+                // close to the enemy's first waypoint so it can shoot.
+                first = way.waypoints[0];
+                strongest = null;
+                for (t : this.game.towerCatalog) {
+                    if (strongest == null) { strongest = t; }
+                    else { if (t.attack > strongest.attack) { strongest = t; } }
+                }
+                bestCell = null;
+                bestD2 = 0.0;
+                for (cell : this.game.world.getEntitiesByType(["TOWER_BASE"])) {
+                    dx = cell.getX() - first.getX();
+                    dy = cell.getY() - first.getY();
+                    d2 = dx * dx + dy * dy;
+                    if (bestCell == null) { bestCell = cell; bestD2 = d2; }
+                    else { if (d2 < bestD2) { bestCell = cell; bestD2 = d2; } }
+                }
+                if (bestCell != null) {
+                    this.game.spawnTower(bestCell, strongest);
+                    this.manualTowerCount = this.game.towers.size();
+                }
+            }
+        }
+
+        // Phase 2 (after 6s): capture outcomes.
+        if (this.phase == 1 && this.elapsed > 6.0) {
+            this.phase = 2;
+            this.moneyAfterCombat = fxgl.geti("money");
+            this.enemyDied = (this.moneyAfterCombat > this.moneyStart);
+            if (fxgl.geti("playerHP") < this.hpStart) { this.hpStartedDecreasing = true; }
+        }
+
+        if (this.elapsed > 12.0) {
+            this.hpFinal = fxgl.geti("playerHP");
+            this.app.exit();
+        }
+    }
+
+    /*
+     * Assertions
+     */
+
+    @Test(name = "(level) level1.json loads with the expected name.")
+    public levelNameLoaded() { return this.expect(this.levelName, "L1 - Hello World"); }
+
+    @Test(name = "(level) max wave index is 1.")
+    public maxWaveIs1() { return this.expect(this.maxWave, 1); }
+
+    @Test(name = "(tmx) TMX object layer produced exactly one WAY entity.")
+    public wayEntityCount() { return this.expect(this.wayCount, 1); }
+
+    @Test(name = "(tmx) TMX object layer produced 14 TOWER_BASE entities.")
+    public baseEntityCount() { return this.expect(this.baseCount, 14); }
+
+    @Test(name = "(vars) money starts at the level's startMoney.")
+    public moneyStartIsLevelMoney() { return this.expect(this.moneyStart, 100); }
+
+    @Test(name = "(vars) playerHP starts at Config.STARTING_HP.")
+    public hpStartIsConfig() { return this.expect(this.hpStart, 15); }
+
+    @Test(name = "(way) the way1 entity is found by name.")
+    public way1FoundByName() { return this.expect(this.way1Found, true); }
+
+    @Test(name = "(spawn) manually spawning an enemy adds to the controllers list.")
+    public manualEnemyAdded() { return this.expect(this.manualEnemyCount, 1); }
+
+    @Test(name = "(spawn) manually spawning a tower adds to the controllers list.")
+    public manualTowerAdded() { return this.expect(this.manualTowerCount, 1); }
+
+    @Test(name = "(combat) bullet kill awards money beyond startMoney.")
+    public towerKillRewards() { return this.expect(this.enemyDied, true); }
+}

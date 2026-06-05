@@ -1,0 +1,601 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * In-game UI widgets for the Tower Defense port.
+ *
+ *   HudIcon         - the 145x64 rounded panel used for the top-left
+ *                     status icons (money, HP, wave, enemies).
+ *   Money/HP/Wave/
+ *   EnemiesIcon     - HudIcon subclasses that the app updates each
+ *                     time a world var changes.
+ *
+ *   Icon            - the same 145x64 panel, used as a clickable
+ *                     button surface (matches the original's
+ *                     `td.ui.Icon` Parent subclass).
+ *   SellIcon        - the gold-tinted money texture plus "Sell"
+ *                     label, used inside the sell box.
+ *   TowerIcon       - a circular badge + cost text for one tower
+ *                     entry inside the selection box.
+ *
+ *   TowerSelectionBox
+ *                   - the HBox of TowerIcons shown when an empty
+ *                     base is clicked. Each icon fires the app's
+ *                     onTowerSelected.
+ *   TowerSellBox    - the HBox containing a single SellIcon shown
+ *                     when a base with a tower is clicked. Fires
+ *                     the app's onTowerSold.
+ */
+
+include fx.Group;
+include fx.HBox;
+include fx.VBox;
+include fx.StackPane;
+include fx.Rectangle;
+include fx.Circle;
+include fx.Color;
+include fx.Text;
+include fx.Button;
+include fx.IntegerProperty;
+include fx.StringProperty;
+include fxgl;
+include fxgl.AnimationBuilder;
+include fxgl.Bindings;
+include fxgl.Interpolators;
+include gametext;
+
+/**
+ * Base HUD icon: a 145x64 rounded gray panel with an optional texture
+ * on the left and a white text label on the right. Subclasses are free
+ * to add extra nodes by reaching `this.root`.
+ */
+class HudIcon {
+    /** The visual root (fx.Group). */
+    public root = null;
+    /** Mirror of `root.obj` so this can be passed to addUINode. */
+    public obj = null;
+    /** The Text node updated by `setText`. */
+    public text = null;
+
+    /**
+     * @p App is the TowerDefenseApp, used for asset loading.
+     * @p IconPath is the texture path under `assets/textures/`, or null
+     *    for an empty icon area.
+     * @p InitialText is the first text shown in the label.
+     * @p TextX is the X position of the label inside the panel.
+     * @p TextY is the Y position of the label inside the panel.
+     */
+    public HudIcon(object App, IconPath, string InitialText, double TextX = 54.0, double TextY = 45.0) {
+        this.root = new Group();
+
+        bg = new Rectangle(0.0, 0.0, 145.0, 64.0);
+        bg.setFill(new Color("#808080", 0.75));
+        bg.setStroke(new Color("#000000", 0.9));
+        bg.setStrokeWidth(2.0);
+        bg.setArcWidth(10.0);
+        bg.setArcHeight(10.0);
+        this.root.add(bg);
+
+        if (IconPath != null) {
+            tex = App.loadTex(IconPath);
+            this.root.add(tex);
+        }
+
+        this.text = new Text(TextX, TextY, InitialText);
+        this.text.setFill(new Color("#FFFFFF"));
+        this.root.add(this.text);
+
+        this.obj = this.root.obj;
+    }
+
+    /**
+     * Tinted-icon constructor used by MoneyIcon and HPIcon. Loads
+     * the texture, runs it through `multiplyColor`, and lays it
+     * out exactly like the non-tinted variant.
+     * @p App is the TowerDefenseApp, used for asset loading.
+     * @p IconPath is the texture path under `assets/textures/`.
+     * @p Tint is a Color wrapper used to tint the texture.
+     * @p InitialText is the first text shown in the label.
+     */
+    public HudIconTinted(object App, string IconPath, object Tint, string InitialText) {
+        this.root = new Group();
+
+        bg = new Rectangle(0.0, 0.0, 145.0, 64.0);
+        bg.setFill(new Color("#808080", 0.75));
+        bg.setStroke(new Color("#000000", 0.9));
+        bg.setStrokeWidth(2.0);
+        bg.setArcWidth(10.0);
+        bg.setArcHeight(10.0);
+        this.root.add(bg);
+
+        tex = App.loadTex(IconPath).multiplyColor(Tint);
+        this.root.add(tex);
+
+        this.text = new Text(54.0, 45.0, InitialText);
+        this.text.setFill(new Color("#FFFFFF"));
+        this.root.add(this.text);
+
+        this.obj = this.root.obj;
+    }
+
+    /**
+     * Updates the label text.
+     * @p S is the new label.
+     */
+    public setText(string S) {
+        this.text.setText(S);
+    }
+
+    /**
+     * Binds the label's textProperty to the given world var
+     * `getip(VarName).asString(Format)`. Mirrors the original Java
+     * `text.textProperty().bind(getip(KEY).asString("...%d..."))`
+     * pattern.
+     * @p VarName is the world property key (e.g. "money").
+     * @p Format is the printf-style format passed to asString.
+     */
+    public bindTextToVar(string VarName, string Format) {
+        intProp = new IntegerProperty();
+        intProp.obj = fxgl.getip(VarName);
+        bindingAjo = intProp.asString(Format);
+        this.text.textProperty().invoke("bind", bindingAjo);
+    }
+}
+
+/**
+ * Money icon: shows the player's current money. Backed by the
+ * `money.png` texture tinted gold to match the original.
+ */
+class MoneyIcon : HudIcon {
+    /** The app reference, kept so the change animation can pull
+     *  a fresh texture copy on each money-change tick. */
+    public app = null;
+
+    /**
+     * @p App is the TowerDefenseApp.
+     */
+    public MoneyIcon(object App) {
+        this.HudIconTinted(App, "money.png", new Color("#FFD700"), "0");
+        GameText.applyUIFont(this.text, 32.0);
+        this.app = App;
+        this.bindTextToVar("money", "%d");
+    }
+
+    /**
+     * Drops a translucent gold money texture in from above (gain)
+     * or from below (loss) and fades it back behind the panel.
+     * Matches the original's animated coin-bounce on every money
+     * delta.
+     * @p Increased is true when the new total is higher than the
+     *    old total.
+     */
+    public playChangeAnim(bool Increased) {
+        copy = this.app.loadTex("money.png").multiplyColor(new Color("#FFD700"));
+        this.root.add(copy);
+        // Hold a reference so the onFinished callback can remove
+        // the same node (`pendingCoinCopy` rotates per call).
+        this.pendingCoinCopy = copy;
+        b = new AnimationBuilder();
+        b.duration(0.5);
+        b.interpolator(Interpolators.easeOut("EXPONENTIAL"));
+        b.onFinished(::removePendingCoin);
+        sub = b.translate([copy.obj]);
+        if (Increased) {
+            sub.from(0.0, -64.0);
+            sub.to(0.0, 0.0);
+        } else {
+            sub.from(0.0, 0.0);
+            sub.to(0.0, -64.0);
+        }
+        sub.buildAndPlay();
+    }
+
+    /** Slot holding the most recently animated coin copy. */
+    public pendingCoinCopy = null;
+
+    /**
+     * AnimationBuilder.onFinished hook -- removes the temporary
+     * coin texture from the icon's children so successive money
+     * changes do not accumulate Node references in `this.root`.
+     */
+    public removePendingCoin() {
+        if (this.pendingCoinCopy == null) { return null; }
+        children = this.root.obj.invokeRaw("getChildren");
+        children.invoke("remove", this.pendingCoinCopy.obj);
+        this.pendingCoinCopy = null;
+    }
+}
+
+/**
+ * HP icon: shows the player's remaining HP. Backed by the
+ * `health.png` texture tinted red to match the original.
+ */
+class HPIcon : HudIcon {
+    /**
+     * @p App is the TowerDefenseApp.
+     */
+    public HPIcon(object App) {
+        this.HudIconTinted(App, "health.png", new Color("#FF0000"), "0");
+        GameText.applyUIFont(this.text, 32.0);
+        this.bindTextToVar("playerHP", "%d");
+    }
+}
+
+/**
+ * Wave icon: shows the current wave number when a wave is running,
+ * or a countdown plus a Start button while waiting between waves.
+ * Subclasses HudIcon for the panel + label, then adds a second
+ * countdown Text and a Start button.
+ */
+class WaveIcon : HudIcon {
+    /** "Wave N / max" text shown between countdowns. */
+    public textWave = null;
+    /** "Wave in: N" countdown text shown while waiting. */
+    public textCountdown = null;
+    /** Button that skips the countdown. */
+    public startBtn = null;
+    /** The level's max wave index, used to format `Wave N / M`. */
+    public maxWave = 0;
+    /** Seconds remaining in the current countdown (0 when running). */
+    public countdown = 0;
+    /** Callback to run once the countdown reaches zero. */
+    public waveStartAction = null;
+    /** Active 1-second TimerAction (null when not counting). */
+    public tick = null;
+
+    /**
+     * @p App is the TowerDefenseApp.
+     */
+    public WaveIcon(object App) {
+        this.HudIcon(App, null, "Wave 0", 5.0, 40.0);
+        this.textWave = this.text;
+        GameText.applyUIFont(this.textWave, 24.0);
+
+        this.textCountdown = new Text(5.0, 40.0, "");
+        this.textCountdown.setFill(new Color("#FFFFFF"));
+        GameText.applyUIFont(this.textCountdown, 24.0);
+        this.root.add(this.textCountdown);
+
+        // The original styles the Start button with the
+        // `wave_button` CSS class (same gradient as the Play
+        // button, smaller font). Without the class it falls back
+        // to the default JavaFX button look.
+        this.startBtn = new Button("Start");
+        sc = this.startBtn.obj.invokeRaw("getStyleClass");
+        sc.invoke("add", "wave_button");
+        // Match the original Java WaveIcon: btnStart.setTranslateX(150).
+        this.startBtn.setTranslateX(150.0);
+        this.startBtn.setTranslateY(15.0);
+        this.startBtn.onClick(::onStartClick);
+        this.root.add(this.startBtn);
+
+        this.refreshVisibility();
+    }
+
+    /**
+     * @p Max is the level's maximum wave index.
+     */
+    public setMaxWave(int Max) {
+        this.maxWave = Max;
+        // Bind the currentWave label to the world var so it
+        // updates without a manual refreshWaveLabel call after
+        // every set("currentWave", ...). Mirrors the original
+        // `getip(CURRENT_WAVE).asString("Wave %d / " + maxWave)`.
+        intProp = new IntegerProperty();
+        intProp.obj = fxgl.getip("currentWave");
+        bindingAjo = intProp.asString("Wave %d / " + Max);
+        this.textWave.textProperty().invoke("bind", bindingAjo);
+    }
+
+    /**
+     * No-op once `setMaxWave` has been called -- the label's
+     * textProperty is bound to the world var directly and refreshes
+     * itself whenever `currentWave` changes. Kept on the surface
+     * for the old `updateHud` call sites.
+     */
+    public refreshWaveLabel() { }
+
+    /**
+     * Starts a `Seconds`-long countdown and arms the given action to
+     * run when it reaches zero.
+     * @p Seconds is the countdown length.
+     * @p Action is a no-arg callback to run when time is up.
+     */
+    public scheduleWave(int Seconds, callback Action) {
+        this.waveStartAction = Action;
+        this.countdown = Seconds;
+        this.textCountdown.setText("Wave in: " + this.countdown);
+        this.refreshVisibility();
+        if (this.tick != null) {
+            this.tick.expire();
+            this.tick = null;
+        }
+        this.tick = fxgl.getGameTimer().runAtInterval(::onTick, 1.0);
+    }
+
+    /** Per-second timer tick: decrements and fires when zero. */
+    public onTick() {
+        if (this.countdown > 0) {
+            this.countdown = this.countdown - 1;
+            this.textCountdown.setText("Wave in: " + this.countdown);
+            if (this.countdown == 0) {
+                this.fire();
+            }
+        }
+    }
+
+    /**
+     * Click handler on the Start button: skip the countdown.
+     * `fx.Button.onClick` wires through `setOnAction` whose
+     * EventHandler closure delivers the ActionEvent -- the
+     * callback signature has to accept it.
+     * @p Event is the JavaFX ActionEvent AJO.
+     */
+    public onStartClick(object Event) {
+        this.countdown = 0;
+        this.fire();
+    }
+
+    /** Tears down the timer + visibility, then calls the action. */
+    public fire() {
+        if (this.tick != null) {
+            this.tick.expire();
+            this.tick = null;
+        }
+        this.refreshVisibility();
+        if (this.waveStartAction != null) {
+            cb = this.waveStartAction;
+            this.waveStartAction = null;
+            cb.call();
+        }
+    }
+
+    /** Shows the right text + button depending on countdown state. */
+    public refreshVisibility() {
+        if (this.countdown > 0) {
+            this.textWave.setVisible(false);
+            this.textCountdown.setVisible(true);
+            this.startBtn.setVisible(true);
+        } else {
+            this.textWave.setVisible(true);
+            this.textCountdown.setVisible(false);
+            this.startBtn.setVisible(false);
+            this.refreshWaveLabel();
+        }
+    }
+}
+
+/**
+ * Enemies icon: shows remaining enemies on screen. No texture; pure
+ * text.
+ */
+class EnemiesIcon : HudIcon {
+    /**
+     * @p App is the TowerDefenseApp.
+     */
+    public EnemiesIcon(object App) {
+        this.HudIcon(App, null, "Left: 0", 5.0, 40.0);
+        GameText.applyUIFont(this.text, 24.0);
+        this.bindTextToVar("numEnemies", "Left: %d");
+    }
+}
+
+/**
+ * Same 145x64 rounded gray panel as HudIcon, but laid out as a Group
+ * for use inside the sell box. The original `td.ui.Icon` extends
+ * `javafx.scene.Parent`; a `fx.Group` carries the same composite
+ * behavior here.
+ */
+class Icon {
+    /** The visual root (fx.Group). */
+    public root = null;
+    /** Mirror of `root.obj`. */
+    public obj = null;
+
+    /**
+     * Builds the rounded gray background and stores it as the only
+     * child until subclasses add more.
+     */
+    public Icon() {
+        this.root = new Group();
+        bg = new Rectangle(0.0, 0.0, 145.0, 64.0);
+        bg.setFill(new Color("#808080", 0.75));
+        bg.setStroke(new Color("#000000", 0.9));
+        bg.setStrokeWidth(2.0);
+        bg.setArcWidth(10.0);
+        bg.setArcHeight(10.0);
+        this.root.add(bg);
+        this.obj = this.root.obj;
+    }
+}
+
+/**
+ * "Sell" button: a gold-tinted money texture plus a white "Sell"
+ * label, sized to match the original sell icon. Used by
+ * TowerSellBox.
+ */
+class SellIcon : Icon {
+    /**
+     * @p App is the TowerDefenseApp, used for texture loading.
+     */
+    public SellIcon(object App) {
+        this.Icon();
+        tex = App.loadTex("money.png").multiplyColor(new Color("#FFD700"));
+        this.root.add(tex);
+
+        label = new Text(54.0, 45.0, "Sell");
+        label.setFill(new Color("#FFFFFF"));
+        GameText.applyUIFont(label, 32.0);
+        this.root.add(label);
+    }
+}
+
+/**
+ * One entry inside the tower selection box: a circular badge that
+ * holds the tower texture above the tower's cost. Each icon owns its
+ * own click handler so the box knows which TowerData was selected
+ * without searching by event source.
+ */
+class TowerIcon {
+    /** The visual root (fx.VBox). */
+    public root = null;
+    /** Mirror of `root.obj`. */
+    public obj = null;
+    /** The TowerData this icon represents. */
+    public data = null;
+    /** The TowerSelectionBox that owns this icon. */
+    public box = null;
+    /** The tower texture, kept so bindToMoney can dim it. */
+    public texture = null;
+
+    /**
+     * @p App is the TowerDefenseApp, used for texture loading.
+     * @p TowerData is the tower stats block this icon represents.
+     * @p Box is the parent TowerSelectionBox, so the click handler
+     *    can read the currently-set cell off it.
+     */
+    public TowerIcon(object App, object TowerData, Box = null) {
+        this.data = TowerData;
+        this.box = Box;
+        this.root = new VBox();
+        this.root.setSpacing(10.0);
+        this.root.setAlignment("TOP_CENTER");
+
+        bg = new Circle(35.0, 35.0, 35.0);
+        bg.setFill(new Color("#808080", 0.0));
+        bg.setStroke(new Color("#FFFFFF"));
+        bg.setStrokeWidth(2.5);
+
+        this.texture = App.loadTex(TowerData.imageName);
+
+        sp = new StackPane();
+        sp.add(bg);
+        sp.add(this.texture);
+
+        cost = new Text(0.0, 0.0, "" + TowerData.cost);
+        cost.setFill(new Color("#FFFFFF"));
+        cost.setStroke(new Color("#000000"));
+        GameText.applyGameFont(cost, 18.0);
+
+        this.root.add(sp);
+        this.root.add(cost);
+        if (Box != null) { this.root.setOnMouseClicked(::onClicked); }
+        this.obj = this.root.obj;
+    }
+
+    /**
+     * Binds the tower texture's opacity to the player's money so
+     * the icon fades to 25% opacity when the player cannot afford
+     * it. Mirrors the original `bindToMoney` Bindings.when chain.
+     */
+    public bindToMoney() {
+        moneyProp = new IntegerProperty();
+        moneyProp.obj = fxgl.getip("money");
+        // greaterThanOrEqualTo returns a BooleanBinding AJO.
+        cond = moneyProp.obj.invokeRaw("greaterThanOrEqualTo", this.data.cost);
+        binding = Bindings.when(cond).then(1.0).otherwise(0.25);
+        this.texture.opacityProperty().invoke("bind", binding);
+    }
+
+    /**
+     * Forwards the click to the owning box's app.
+     * @p Event is the JavaFX MouseEvent AJO.
+     */
+    public onClicked(object Event) {
+        if (this.box.cell != null) {
+            this.box.app.onTowerSelected(this.box.cell, this.data);
+        }
+    }
+}
+
+/**
+ * Horizontal row of TowerIcons shown when the player clicks an empty
+ * tower base. The cell entity is set before showing, and each icon's
+ * click fires onTowerSelected(cell, data) on the app.
+ */
+class TowerSelectionBox {
+    /** The visual root (fx.HBox). */
+    public root = null;
+    /** Mirror of `root.obj`. */
+    public obj = null;
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+    /** The cell Entity currently associated with the box. */
+    public cell = null;
+    /** The TowerIcons inside, parallel to `app.towerCatalog`. */
+    public icons = [];
+
+    /**
+     * @p AppRef is the TowerDefenseApp.
+     * @p TowerCatalog is the list of TowerData to populate the box.
+     */
+    public TowerSelectionBox(object AppRef, list TowerCatalog) {
+        this.app = AppRef;
+        this.root = new HBox();
+        this.root.setSpacing(5.0);
+        this.icons = [];
+        for (td : TowerCatalog) {
+            icon = new TowerIcon(AppRef, td, this);
+            icon.bindToMoney();
+            this.icons.add(icon);
+            this.root.add(icon.root);
+        }
+        this.obj = this.root.obj;
+    }
+
+    /**
+     * Associates a cell entity with the box so the next click knows
+     * which base to place the tower on.
+     * @p Cell is the tower-base Entity wrapper.
+     */
+    public setCell(object Cell) {
+        this.cell = Cell;
+    }
+}
+
+/**
+ * Horizontal row holding a single SellIcon shown when the player
+ * clicks a base that already has a tower. Clicking fires the app's
+ * onTowerSold.
+ */
+class TowerSellBox {
+    /** The visual root (fx.HBox). */
+    public root = null;
+    /** Mirror of `root.obj`. */
+    public obj = null;
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+    /** The cell Entity currently associated with the box. */
+    public cell = null;
+
+    /**
+     * @p AppRef is the TowerDefenseApp.
+     */
+    public TowerSellBox(object AppRef) {
+        this.app = AppRef;
+        this.root = new HBox();
+        this.root.setSpacing(5.0);
+        btn = new SellIcon(AppRef);
+        btn.root.setOnMouseClicked(::onBtnClicked);
+        this.root.add(btn.root);
+        this.obj = this.root.obj;
+    }
+
+    /**
+     * Click handler for the sell button. Delegates to onTowerSold on
+     * the app when a cell is set.
+     * @p Event is the JavaFX MouseEvent AJO.
+     */
+    public onBtnClicked(object Event) {
+        if (this.cell != null) {
+            this.app.onTowerSold(this.cell);
+        }
+    }
+
+    /**
+     * Associates a cell entity with the box.
+     * @p Cell is the tower-base Entity wrapper whose tower is for sale.
+     */
+    public setCell(object Cell) {
+        this.cell = Cell;
+    }
+}

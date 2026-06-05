@@ -1,0 +1,147 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Buff / on-hit effect classes for the Tower Defense port.
+ *
+ * Each tower may have one or more on-hit effects. When a bullet hits an
+ * enemy, the bullet asks the tower for its effects; for each effect a
+ * dice roll against `chance` decides whether it triggers. If it does:
+ *   1. `onTriggered(tower, target)` runs the immediate side-effect (e.g.
+ *      crit raises the tower's damage modifier).
+ *   2. `getEffect()` returns an optional FXGL `Effect` instance that the
+ *      bullet starts on the target's `EffectComponent` (e.g. a
+ *      `SlowTimeEffect` that slows the enemy for a while).
+ *
+ * `getEffect()` returning null is the "no duration effect" case --
+ * cleaner than the original's `DummyEffect` placeholder.
+ */
+
+include fxgl.SlowTimeEffect;
+
+/**
+ * Base class for tower-attached on-hit effects.
+ */
+class OnHitEffect {
+    /** Trigger probability in [0, 1]. */
+    public chance = 0.0;
+
+    /**
+     * @p Chance is the trigger probability in [0, 1].
+     */
+    public OnHitEffect(double Chance = 0.0) {
+        this.chance = Chance;
+    }
+
+    /**
+     * @r The trigger chance in [0, 1].
+     */
+    public getChance() {
+        return this.chance;
+    }
+
+    /**
+     * Returns the optional FXGL Effect wrapper applied to the target via
+     * `EffectComponent.startEffect`. Subclasses override; default is
+     * null (no duration effect).
+     * @r An Effect wrapper, or null.
+     */
+    public getEffect() {
+        return null;
+    }
+
+    /**
+     * Called when this effect fires on the given target.
+     * @p TowerCmp is the TowerComponent of the shooting tower.
+     * @p Target is the enemy Entity wrapper that was hit.
+     */
+    public onTriggered(object TowerCmp, object Target) {
+    }
+}
+
+/**
+ * Crit effect: multiplies the tower's damage modifier for this hit.
+ */
+class CritEffect : OnHitEffect {
+    /** Damage multiplier to apply on trigger. */
+    public damageModifier = 1.0;
+
+    /**
+     * @p Chance is the trigger probability in [0, 1].
+     * @p DamageModifier is the damage multiplier on trigger.
+     */
+    public CritEffect(double Chance, double DamageModifier) {
+        this.chance = Chance;
+        this.damageModifier = DamageModifier;
+    }
+
+    /**
+     * Multiplies the tower's damage modifier so the impending damage
+     * calculation uses the crit value.
+     * @p TowerCmp is the TowerComponent.
+     * @p Target is the enemy Entity wrapper (unused).
+     */
+    public onTriggered(object TowerCmp, object Target) {
+        TowerCmp.setDamageModifier(TowerCmp.getDamageModifier() * this.damageModifier);
+    }
+}
+
+/**
+ * Slow effect: slows the target's time-component ratio for a duration.
+ */
+class SlowEffect : OnHitEffect {
+    /** Time ratio while the slow is active (less than 1.0 = slower). */
+    public ratio = 0.5;
+    /** Slow duration in seconds. */
+    public duration = 1.0;
+
+    /**
+     * @p Ratio is the time scale while slowed.
+     * @p DurationSeconds is the slow duration in seconds.
+     * @p Chance is the trigger probability in [0, 1].
+     */
+    public SlowEffect(double Ratio, double DurationSeconds, double Chance) {
+        this.chance = Chance;
+        this.ratio = Ratio;
+        this.duration = DurationSeconds;
+    }
+
+    /**
+     * Returns a fresh SlowTimeEffect every call so the bullet's
+     * EffectComponent gets its own copy.
+     * @r A SlowTimeEffect wrapper.
+     */
+    public getEffect() {
+        return new SlowTimeEffect(this.ratio, this.duration);
+    }
+}
+
+/**
+ * Parses a single effect descriptor like `crit,5,2` or `slow,10,1.5`
+ * into the matching OnHitEffect wrapper. Tower JSON files store these
+ * as comma-separated string entries in their `effects` array.
+ *
+ * @p Spec is the descriptor string.
+ * @r An OnHitEffect wrapper.
+ */
+static class Buffs {
+    /**
+     * Parses one effect string into an OnHitEffect.
+     * @p Spec is the descriptor string.
+     * @r An OnHitEffect wrapper.
+     */
+    public parse(string Spec) {
+        parts = Spec.split(",");
+        kind = parts[0];
+        if (kind == "crit") {
+            chance = Double.parse(parts[1]) * 0.01;
+            mod = Double.parse(parts[2]);
+            return new CritEffect(chance, mod);
+        }
+        if (kind == "slow") {
+            chance = Double.parse(parts[1]) * 0.01;
+            dur = Double.parse(parts[2]);
+            return new SlowEffect(0.5, dur, chance);
+        }
+        throw new aussomException("Unknown effect: " + Spec);
+    }
+}

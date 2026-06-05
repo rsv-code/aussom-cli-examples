@@ -1,0 +1,466 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Regression coverage for the user-facing flow that the original
+ * `towerdefenseTest.aus` deliberately bypasses (it sets
+ * `enableMenus = false` and drives the game by directly calling
+ * `spawnEnemy` / `spawnTower`). The bugs below all reproduce in
+ * the live game but are silent against the existing suite:
+ *
+ *  - main menu can't even be constructed
+ *  - clicking a level row throws
+ *  - Settings handler throws (DialogService double-wrap)
+ *  - Exit handler instantly kills the app (no confirmation)
+ *  - Play button is the wrong widget kind (custom polygon
+ *    MenuButton rather than the original CSS-styled fx.Button)
+ *  - `main.css` is not loaded into the scene
+ *  - the wave timer never fires (the WaveIcon countdown never
+ *    advances, so no enemy ever spawns from the schedule)
+ *  - `onCellClick` throws when invoked from a real FXGL handler
+ *
+ * Each test below targets one of those failures.
+ */
+
+include aunit;
+include fxgl;
+include fxgl.FXGLAssetLoaderService;
+include fxgl.ReadOnlyGameSettings;
+include testfx;
+include fx.Button;
+include towerdefense;
+include menus;
+include file;
+
+@Test(name = "Tower Defense -- live-flow regressions")
+class towerDefenseLiveTest : test {
+    public game = null;
+    public app = null;
+    public mainMenu = null;
+    public elapsed = 0.0;
+    public phase = 0;
+
+    /* Captured state. */
+    public menuBuiltOk = false;
+    public menuBuildErr = "";
+    public clickLevelOk = false;
+    public clickLevelErr = "";
+    public clickSettingsOk = false;
+    public clickSettingsErr = "";
+    public clickExitOk = false;
+    public clickExitErr = "";
+    public cellClickOk = false;
+    public cellClickErr = "";
+    public playButtonIsFxButton = false;
+    public playButtonHasStyleClass = false;
+    public cssListContainsMain = false;
+    public cssListContainsDark = false;
+    public waveTimerFiredByT3 = -1;
+    public waveTimerFiredByT25 = -1;
+    public firstEnemyWallClockSec = -1.0;
+
+    public towerSoldIsDespawning = false;
+    public moneyCapEnforced = false;
+    public settingsTitle = "";
+    public settingsVersion = "";
+    public hudUINodeCount = -1;
+    public towerSpawnsCleanly = false;
+    public towerOriginX = -1.0;
+    public towerOriginY = -1.0;
+    public startBtnOk = false;
+    public startBtnErr = "";
+    public nextOfLevel1 = "";
+    public nextOfLastIsNull = false;
+    public sceneCssLoaded = false;
+    public hudFontFamily = "";
+
+    @Before
+    public runBefore() {
+        testfx.setHeadless(true);
+        this.game = new TowerDefenseApp();
+        this.app = this.game.build("TD Live Test");
+        this.app.onUpdate(::onUpdate);
+        this.app.launch();
+    }
+
+    public onUpdate(tpf) {
+        this.elapsed = this.elapsed + tpf;
+
+        // Phase 1 (after 0.5s): exercise the live menu flow.
+        if (this.phase == 0 && this.elapsed > 0.5) {
+            this.phase = 1;
+            this.runMenuFlow();
+            this.smokeCellClick();
+            this.captureCssState();
+            this.captureHudCount();
+        }
+
+        // Phase 2 (after 3s): how many enemies have spawned by now?
+        // Should still be zero since wave prep is 20s -- but the wave
+        // tick countdown should be ticking.
+        if (this.phase == 1 && this.elapsed > 3.0) {
+            this.phase = 2;
+            this.waveTimerFiredByT3 = this.game.world.getEntitiesByType(["ENEMY"]).size();
+        }
+
+        // Phase 3: capture the simulated time at which the first
+        // enemy appears so we can verify the 2-second hack delay is
+        // gone. The first enemy should appear at WAVE_PREP_TIME
+        // (20.5s after game start) -- with the 2s hack it's at 22.5s.
+        if (this.phase == 2 && this.firstEnemyWallClockSec < 0.0) {
+            n = this.game.world.getEntitiesByType(["ENEMY"]).size();
+            if (n > 0) { this.firstEnemyWallClockSec = this.elapsed; }
+        }
+
+        // Phase 4 (after 25s): WAVE_PREP_TIME (20s) plus a 5s buffer.
+        // Verify drift catalog items via direct method calls.
+        if (this.phase == 2 && this.elapsed > 25.0) {
+            this.phase = 3;
+            this.waveTimerFiredByT25 = this.game.world.getEntitiesByType(["ENEMY"]).size();
+            this.checkTowerSellDespawning();
+            this.checkMoneyCap();
+            this.checkTowerAnchor();
+            this.checkStartButton();
+            this.checkLevelProgression();
+            this.checkSceneCss();
+            this.checkHudFont();
+            this.app.exit();
+        }
+    }
+
+    /**
+     * Spawning a tower needs to call `setRotationOrigin(cx, cy)`
+     * after `addBoundingBox` so per-shot `rotateBy` pivots in
+     * place instead of sliding the sprite off the cell. FXGL's
+     * entityBuilder does this automatically through
+     * `bbox(HitBox)`; the Aussom wrapper's `addBoundingBox` does
+     * not, so the spawn path has to set it by hand. Read the
+     * origin back through the new `Entity.getRotationOrigin()`
+     * wrapper and confirm it lands on the bbox centre.
+     */
+    public checkTowerAnchor() {
+        try {
+            bases = this.game.world.getEntitiesByType(["TOWER_BASE"]);
+            if (bases.size() == 0) { return null; }
+            this.game.spawnTower(bases[0], this.game.towerCatalog[0]);
+            this.towerSpawnsCleanly = true;
+            tw = this.game.towers[this.game.towers.size() - 1];
+            origin = tw.entity.getRotationOrigin();
+            this.towerOriginX = origin.invoke("getX");
+            this.towerOriginY = origin.invoke("getY");
+        } catch (e) {}
+    }
+
+    /**
+     * `fx.Button.onClick` delivers an ActionEvent to its callback.
+     * `WaveIcon.onStartClick` has to accept one positional arg or
+     * the button click crashes the live game.
+     */
+    public checkStartButton() {
+        try {
+            this.game.waveIcon.onStartClick(null);
+            this.startBtnOk = true;
+        } catch (e) {
+            this.startBtnErr = "" + e;
+        }
+    }
+
+    /**
+     * After a winning level dismiss the player should advance to
+     * the next level in `levelNames` instead of falling back to the
+     * main menu. The pure-function `nextLevelName` is the seam.
+     */
+    public checkLevelProgression() {
+        try {
+            this.nextOfLevel1 = this.game.nextLevelName("level1.json");
+            last = this.game.levelNames[this.game.levelNames.size() - 1];
+            this.nextOfLastIsNull = (this.game.nextLevelName(last) == null);
+        } catch (e) {}
+    }
+
+    /**
+     * Captures the live font family on a HUD label so a future
+     * regression that silently swallows the GAME/UI font load is
+     * caught by the test suite, not by the next playtest.
+     */
+    public checkHudFont() {
+        try {
+            t = this.game.moneyIcon.text;
+            this.hudFontFamily = t.obj.invokeRaw("getFont").invoke("getFamily");
+        } catch (e) {}
+    }
+
+    /**
+     * `onInitUI` adds main.css to the game scene's content-root
+     * stylesheet list as a `file://` URL so the FXGL `play_button`
+     * / `wave_button` rules pick up the cwd-relative file.
+     */
+    public checkSceneCss() {
+        try {
+            scene = fxgl.getGameScene();
+            cr = scene.obj.invokeRaw("getContentRoot");
+            sheets = cr.invokeRaw("getStylesheets");
+            n = sheets.invoke("size");
+            i = 0;
+            while (i < n) {
+                s = sheets.invoke("get", i);
+                if (s.contains("main.css")) {
+                    this.sceneCssLoaded = true;
+                }
+                i = i + 1;
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * Original sets `isDespawning=true` on the tower entity in
+     * `onTowerSold` so a click during the sell animation is ignored
+     * by the tower's view click handler.
+     */
+    public checkTowerSellDespawning() {
+        try {
+            bases = this.game.world.getEntitiesByType(["TOWER_BASE"]);
+            if (bases.size() == 0) { return null; }
+            cell = bases[0];
+            this.game.towerSelectionBox.setCell(cell);
+            this.game.onTowerSelected(cell, this.game.towerCatalog[0]);
+            this.game.towerSellBox.setCell(cell);
+            this.game.onTowerSold(cell);
+            tower = cell.getProperties().getValue("tower");
+            if (tower != null && tower.entity != null) {
+                this.towerSoldIsDespawning =
+                    tower.entity.getProperties().exists("isDespawning")
+                    && tower.entity.getProperties().getBoolean("isDespawning");
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * Original installs a money listener that caps money at
+     * MAX_MONEY whenever it would exceed. The Aussom port caps
+     * only at specific call sites; verify the listener is wired.
+     */
+    public checkMoneyCap() {
+        try {
+            fxgl.set("money", 9999 + 5000);
+            v = fxgl.geti("money");
+            this.moneyCapEnforced = (v == 9999);
+        } catch (e) {}
+    }
+
+    /**
+     * Builds the main menu in isolation and clicks each sidebar
+     * button (Levels selection, Settings, Exit). Captures any
+     * thrown exception per click.
+     */
+    public runMenuFlow() {
+        // Make sure assets is wired so menu's loadTex works.
+        this.game.cwd = file.getCanonicalPath(".");
+        this.game.assets = new FXGLAssetLoaderService();
+        this.game.assets.obj = fxgl.getAssetLoader();
+
+        try {
+            this.mainMenu = new TowerDefenseMainMenu(this.game);
+            this.menuBuiltOk = true;
+        } catch (e) {
+            this.menuBuildErr = "" + e;
+            return null;
+        }
+
+        // 1) Click a non-first level row.
+        try {
+            if (this.mainMenu.selectBox.items.size() >= 2) {
+                pick = this.mainMenu.selectBox.items[1];
+                this.mainMenu.selectBox.select(pick);
+                this.clickLevelOk = (this.mainMenu.selectBox.getSelectedLevel() == pick.data);
+            }
+        } catch (e) {
+            this.clickLevelErr = "" + e;
+        }
+
+        // 2 & 3) Settings + Exit both pop a dialog. In headless
+        // mode the dialog never gets a click, so calling them
+        // would freeze the loop. Instead, verify the implementation
+        // is wired to the DialogService path: the handler bodies
+        // are inspected by looking for the right call shape via
+        // a stubbed flag (set inside the test-only `dryRunDialog`
+        // helper on the menu).
+        try {
+            this.mainMenu.dryRunDialogs();
+            this.clickSettingsOk = this.mainMenu.lastSettingsMessage != null;
+            this.clickExitOk = this.mainMenu.lastExitConfirmPrompt != null;
+        } catch (e) {
+            this.clickSettingsErr = "" + e;
+            this.clickExitErr = "" + e;
+        }
+
+        // 4) Inspect the Play button: should be an fx.Button with
+        // the "play_button" CSS class, not a custom MenuButton.
+        try {
+            playRoot = this.findPlayButton(this.mainMenu);
+            if (playRoot != null) {
+                this.playButtonIsFxButton = (playRoot instanceof 'Button');
+                styleClass = playRoot.obj.invokeRaw("getStyleClass");
+                this.playButtonHasStyleClass = styleClass.invoke("contains", "play_button");
+            }
+        } catch (e) {}
+    }
+
+    /**
+     * Recursively searches the menu's content tree for the Play
+     * button. The TowerDefenseMainMenu exposes `playButton` for
+     * direct test access.
+     * @p Menu is the main menu wrapper.
+     * @r The Play button wrapper, or null.
+     */
+    public findPlayButton(object Menu) {
+        if (Menu.playButton == null) { return null; }
+        return Menu.playButton;
+    }
+
+    /**
+     * Calls `TowerDefenseApp.onCellClick(null)` to make sure the
+     * handler does not throw when fired by FXGL's
+     * `ViewComponent.addOnClickHandler` route.
+     */
+    public smokeCellClick() {
+        try {
+            this.game.onCellClick(null);
+            this.cellClickOk = true;
+        } catch (e) {
+            this.cellClickErr = "" + e;
+        }
+    }
+
+    /**
+     * Records how many nodes are in the GameScene's UI overlay
+     * right after the live game's onInitUI fires. The four HUD
+     * icons + two selection boxes should produce >= 4 nodes.
+     */
+    public captureHudCount() {
+        try {
+            uiNodes = fxgl.getGameScene().getUINodes();
+            this.hudUINodeCount = uiNodes.invoke("size");
+        } catch (e) {}
+    }
+
+    /**
+     * Verifies that `main.css` was appended to the engine's
+     * stylesheet list during `onInitSettings` AND that FXGL's
+     * default `fxgl_dark.css` was preserved (since the original
+     * Java path is `getCSSList().add(...)`, not `setCSSList(...)`).
+     * The read-only settings exposes the live list via
+     * `getCSSList()` (note: all-caps CSS to match the FXGL JVM
+     * name).
+     */
+    public captureCssState() {
+        try {
+            css = fxgl.getSettings().getCSSList();
+            this.cssListContainsMain = css.invoke("contains", "main.css");
+            this.cssListContainsDark = css.invoke("contains", "fxgl_dark.css");
+        } catch (e) {}
+    }
+
+    /*
+     * Assertions
+     */
+
+    @Test(name = "(menu) TowerDefenseMainMenu constructs without throwing.")
+    public menuBuilds() { return this.expect(this.menuBuiltOk, true); }
+
+    @Test(name = "(menu) clicking a level row updates the selection.")
+    public levelClickWorks() { return this.expect(this.clickLevelOk, true); }
+
+    @Test(name = "(menu) Settings handler runs without throwing.")
+    public settingsRuns() { return this.expect(this.clickSettingsOk, true); }
+
+    @Test(name = "(menu) Exit handler runs without throwing.")
+    public exitRuns() { return this.expect(this.clickExitOk, true); }
+
+    @Test(name = "(menu) Play widget is a real fx.Button.")
+    public playIsButton() { return this.expect(this.playButtonIsFxButton, true); }
+
+    @Test(name = "(menu) Play button carries the 'play_button' CSS class.")
+    public playHasClass() { return this.expect(this.playButtonHasStyleClass, true); }
+
+    @Test(name = "(settings) main.css was added to the CSS list at init.")
+    public cssLoaded() { return this.expect(this.cssListContainsMain, true); }
+
+    @Test(name = "(font) HUD label picks up the FXGL UI font, not System default.")
+    public hudFontApplied() {
+        return this.expect(
+            this.hudFontFamily != "System" && this.hudFontFamily != "",
+            true);
+    }
+
+    @Test(name = "(settings) fxgl_dark.css is preserved in the CSS list.")
+    public fxglDarkInList() {
+        // The init path now appends to the engine's default CSS list
+        // (via the GameSettings.getCssList() wrapper). FXGL ships
+        // `fxgl_dark.css` as the first entry and our extras follow;
+        // if the append ever regresses to a setCssList REPLACE, the
+        // default drops out and every FXGLButton loses its styling.
+        return this.expect(this.cssListContainsDark, true);
+    }
+
+    @Test(name = "(input) onCellClick(null) returns without throwing.")
+    public cellClickSafe() { return this.expect(this.cellClickOk, true); }
+
+    @Test(name = "(wave) wave timer fires at least one enemy spawn by t=25s.")
+    public waveSpawned() {
+        return this.expect(this.waveTimerFiredByT25 >= 1, true);
+    }
+
+    @Test(name = "(wave) first enemy appears before t=21.5s (no 2s hack).")
+    public waveNoDelayHack() {
+        return this.expect(
+            this.firstEnemyWallClockSec > 0.0 && this.firstEnemyWallClockSec < 21.5,
+            true
+        );
+    }
+
+    @Test(name = "(tower) selling a tower sets isDespawning on the entity.")
+    public towerSellSetsDespawning() {
+        return this.expect(this.towerSoldIsDespawning, true);
+    }
+
+    @Test(name = "(money) the money listener caps at MAX_MONEY.")
+    public moneyCap() { return this.expect(this.moneyCapEnforced, true); }
+
+    @Test(name = "(hud) onInitUI adds the four HUD icons + boxes to the UI overlay.")
+    public hudAddedToScene() {
+        // 4 HUD icons + towerSelectionBox + towerSellBox = 6
+        return this.expect(this.hudUINodeCount, 6);
+    }
+
+    @Test(name = "(tower) spawnTower runs without throwing after setRotationOrigin.")
+    public towerAnchorCenteredTest() {
+        return this.expect(this.towerSpawnsCleanly, true);
+    }
+
+    @Test(name = "(tower) rotation origin lands on the bbox centre (32, 32).")
+    public towerOriginIsCentered() {
+        return this.expect(
+            this.towerOriginX == 32.0 && this.towerOriginY == 32.0,
+            true);
+    }
+
+    @Test(name = "(ui) Start button click handler accepts the ActionEvent arg.")
+    public startBtnAcceptsEvent() {
+        return this.expect(this.startBtnOk, true);
+    }
+
+    @Test(name = "(level) nextLevelName(level1.json) advances to level2.json.")
+    public nextLevelAdvances() {
+        return this.expect(this.nextOfLevel1, "level2.json");
+    }
+
+    @Test(name = "(level) nextLevelName on the last level returns null.")
+    public nextLevelLastIsNull() {
+        return this.expect(this.nextOfLastIsNull, true);
+    }
+
+    @Test(name = "(css) game scene's content-root stylesheet list contains main.css.")
+    public sceneCssLoadedTest() {
+        return this.expect(this.sceneCssLoaded, true);
+    }
+}

@@ -1,6 +1,6 @@
 #!/usr/bin/env -S aussom -s
 
-include sys;
+include sys
 
 c.log("App: helloworld.aus\n");
 c.log("System Info:");

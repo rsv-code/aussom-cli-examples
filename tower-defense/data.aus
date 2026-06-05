@@ -1,0 +1,363 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Ported to Aussom from the FXGLGames "TowerDefense" demo by
+ * Almas Baimagambetov, available at
+ * https://github.com/AlmasB/FXGLGames and used here under the MIT
+ * License. The original game and the FXGL engine are
+ * Copyright (c) 2015 AlmasB (almaslvl@gmail.com).
+ *
+ * Data classes and configuration constants for the Tower Defense game.
+ * These mirror the records in the original `td/data/` package and add a
+ * small `Data` static helper for loading them from JSON. JSON loading
+ * goes through `file.read` + `json.parse` because FXGL's wrapped
+ * `loadJSON` returns an empty Optional for plain Map targets at the
+ * moment.
+ */
+
+include file;
+include fxgl.Vec2;
+
+/**
+ * Game-wide constants taken from the original `Config.java`.
+ */
+static class Config {
+    /** Bullet speed in pixels per second. */
+    public BULLET_SPEED() { return 55.0 * 60.0; }
+    /** Maximum allowed money value (clamped on increment). */
+    public MAX_MONEY() { return 9999; }
+    /** Reward for clearing a wave with no damage. */
+    public PERFECT_CLEAR_REWARD() { return 100; }
+    /** Refund percent when selling a tower. */
+    public COST_REFUND_ON_SALE() { return 0.6; }
+    /** Player's starting HP. */
+    public STARTING_HP() { return 15; }
+    /** Z index used for towers (above bullets). */
+    public Z_INDEX_TOWER() { return 5; }
+    /** Z index used for bullets. */
+    public Z_INDEX_BULLET() { return 4; }
+    /** Wave preparation countdown, in seconds. */
+    public WAVE_PREP_TIME() { return 20; }
+    /** Tile size of the Tiled map, in pixels. */
+    public TILE_SIZE() { return 64; }
+}
+
+/**
+ * Game variable names used with `fxgl.set`/`fxgl.geti`.
+ */
+static class Vars {
+    public CURRENT_WAVE() { return "currentWave"; }
+    public PLAYER_HP() { return "playerHP"; }
+    public MONEY() { return "money"; }
+    public NUM_ENEMIES() { return "numEnemies"; }
+    public NUM_TOWERS() { return "numTowers"; }
+}
+
+/**
+ * One enemy archetype loaded from `assets/enemies/<n>.json`.
+ */
+class EnemyData {
+    /** Starting HP. */
+    public hp = 0;
+    /** Money awarded on kill. */
+    public reward = 0;
+    /** Movement speed multiplier. */
+    public moveSpeed = 1.0;
+    /** Image file under `assets/textures/enemies/`. */
+    public imageName = "";
+
+    /**
+     * Builds an EnemyData from a parsed-JSON map.
+     * @p Map is the Aussom map produced by `json.parse`.
+     */
+    public EnemyData(map Map = null) {
+        if (Map != null) {
+            this.hp = Map.hp;
+            this.reward = Map.reward;
+            this.moveSpeed = Map.moveSpeed;
+            this.imageName = Map.imageName;
+        }
+    }
+}
+
+/**
+ * One wave entry inside a `LevelData`.
+ */
+class WaveData {
+    /** Wave index. Waves with the same index spawn together. */
+    public index = 0;
+    /** Enemy JSON file name under `assets/enemies/`. */
+    public enemy = "";
+    /** Number of enemies to spawn. */
+    public amount = 0;
+    /** Seconds between each spawn. */
+    public interval = 0.0;
+    /** Name of the way (path) entity to follow. */
+    public way = "";
+    /** Money awarded after this wave is cleared. */
+    public reward = 0;
+
+    /**
+     * Builds a WaveData from a parsed-JSON map.
+     * @p Map is the Aussom map produced by `json.parse`.
+     */
+    public WaveData(map Map = null) {
+        if (Map != null) {
+            this.index = Map.index;
+            this.enemy = Map.enemy;
+            this.amount = Map.amount;
+            if (Map.containsKey("interval")) { this.interval = Map.interval; }
+            this.way = Map.way;
+            if (Map.containsKey("reward")) { this.reward = Map.reward; }
+        }
+    }
+}
+
+/**
+ * One quest objective inside a `LevelData`.
+ */
+class QuestData {
+    /** Quest description shown in the HUD. */
+    public desc = "";
+    /** World variable observed for progress. */
+    public varName = "";
+    /** Target value of `varName` for completion. */
+    public varValue = 0;
+    /** Money awarded when the quest completes. */
+    public reward = 0;
+
+    /**
+     * Builds a QuestData from a parsed-JSON map.
+     * @p Map is the Aussom map produced by `json.parse`.
+     */
+    public QuestData(map Map = null) {
+        if (Map != null) {
+            this.desc = Map.desc;
+            this.varName = Map.varName;
+            this.varValue = Map.varValue;
+            this.reward = Map.reward;
+        }
+    }
+}
+
+/**
+ * One rune archetype (used by the placeholder RunesView on the
+ * main menu). The original Java `RuneData` record has the same
+ * three fields and is constructed only from JSON, but no rune
+ * data files ship with the project yet -- this is the shape the
+ * shop UI will read from.
+ */
+class RuneData {
+    /** Display name of the rune. */
+    public name = "";
+    /** Currency cost to unlock. */
+    public cost = 0;
+    /** Rune description shown on hover. */
+    public description = "";
+
+    /**
+     * @p Map is the parsed-JSON map.
+     */
+    public RuneData(map Map = null) {
+        if (Map != null) {
+            this.name = Map.name;
+            this.cost = Map.cost;
+            this.description = Map.description;
+        }
+    }
+}
+
+/**
+ * One level loaded from `assets/levels/<n>.json`.
+ */
+class LevelData {
+    /** Source JSON file name (e.g. "level1.json"). */
+    public fileName = "";
+    /** Display name shown in the level selector. */
+    public name = "";
+    /** TMX map file under `assets/levels/tmx/`. */
+    public map = "";
+    /** Starting money for the player. */
+    public startMoney = 0;
+    /** All wave entries for this level. */
+    public waves = [];
+    /** Optional quest objectives. */
+    public quests = [];
+
+    /**
+     * Builds a LevelData from a parsed-JSON map. Nested waves and quest
+     * lists are converted into typed wrappers.
+     * @p Map is the Aussom map produced by `json.parse`.
+     */
+    public LevelData(map Map = null) {
+        if (Map != null) {
+            this.name = Map.name;
+            this.map = Map.map;
+            if (Map.containsKey("startMoney")) { this.startMoney = Map.startMoney; }
+            this.waves = [];
+            for (w : Map.waves) {
+                this.waves.add(new WaveData(w));
+            }
+            this.quests = [];
+            if (Map.containsKey("quests")) {
+                for (q : Map.quests) {
+                    this.quests.add(new QuestData(q));
+                }
+            }
+        }
+    }
+
+    /**
+     * Returns the largest `index` across this level's waves.
+     * @r An int with the last wave index.
+     */
+    public maxWaveIndex() {
+        m = 0;
+        for (w : this.waves) {
+            if (w.index > m) { m = w.index; }
+        }
+        return m;
+    }
+
+    /**
+     * Returns the list of waves whose `index` matches the argument.
+     * @p Index is the wave index to filter by.
+     * @r A list of WaveData.
+     */
+    public wavesAt(int Index) {
+        out = [];
+        for (w : this.waves) {
+            if (w.index == Index) { out.add(w); }
+        }
+        return out;
+    }
+}
+
+/**
+ * One tower archetype loaded from `assets/towers/<n>.json`.
+ */
+class TowerData {
+    /** Display name of the tower. */
+    public name = "";
+    /** Image file under `assets/textures/`. */
+    public imageName = "";
+    /** Optional projectile image; null means use `projectile.png`. */
+    public projectileImageName = null;
+    /** Base attack damage per bullet. */
+    public attack = 0;
+    /** Attacks per second. */
+    public attackRate = 1.0;
+    /** Money cost to place the tower. */
+    public cost = 0;
+    /** True if bullets do splash damage to nearby enemies. */
+    public isSplashDamage = false;
+    /** List of buff effect descriptors as `name,arg1,arg2` strings. */
+    public effects = [];
+
+    /**
+     * Builds a TowerData from a parsed-JSON map.
+     * @p Map is the Aussom map produced by `json.parse`.
+     */
+    public TowerData(map Map = null) {
+        if (Map != null) {
+            this.name = Map.name;
+            this.imageName = Map.imageName;
+            if (Map.containsKey("projectileImageName")) { this.projectileImageName = Map.projectileImageName; }
+            this.attack = Map.attack;
+            this.attackRate = Map.attackRate;
+            this.cost = Map.cost;
+            if (Map.containsKey("isSplashDamage")) { this.isSplashDamage = Map.isSplashDamage; }
+            if (Map.containsKey("effects")) { this.effects = Map.effects; }
+        }
+    }
+}
+
+/**
+ * A waypoint path. The original Java game extracts these from Tiled
+ * `polyline` objects; this wrapper holds the resolved (X, Y) points.
+ */
+class Way {
+    /** List of Vec2 waypoints in path order. */
+    public waypoints = [];
+
+    /**
+     * @p Points is a list of Vec2 wrappers in path order.
+     */
+    public Way(list Points = null) {
+        if (Points != null) { this.waypoints = Points; }
+    }
+
+    /**
+     * Returns a shallow copy of the waypoints list so callers can pop
+     * from the front without affecting the source.
+     * @r A new list of Vec2 wrappers.
+     */
+    public copyPoints() {
+        out = [];
+        for (p : this.waypoints) { out.add(p); }
+        return out;
+    }
+
+}
+
+/**
+ * Static helper that loads JSON data files from `assets/` via
+ * `file.read` + `json.parse`. FXGL's wrapped `loadJSON` currently
+ * returns an empty Optional for generic Map targets, so this is the
+ * working path.
+ */
+static class Data {
+    /**
+     * Loads `assets/enemies/<Name>` and returns an EnemyData.
+     * @p Name is the JSON file name.
+     * @r An EnemyData wrapper.
+     */
+    public loadEnemy(string Name) {
+        m = json.parse(file.read("assets/enemies/" + Name));
+        return new EnemyData(m);
+    }
+
+    /**
+     * Loads `assets/towers/<Name>` and returns a TowerData.
+     * @p Name is the JSON file name.
+     * @r A TowerData wrapper.
+     */
+    public loadTower(string Name) {
+        m = json.parse(file.read("assets/towers/" + Name));
+        return new TowerData(m);
+    }
+
+    /**
+     * Loads `assets/levels/<Name>` and returns a LevelData.
+     * @p Name is the JSON file name.
+     * @r A LevelData wrapper.
+     */
+    public loadLevel(string Name) {
+        m = json.parse(file.read("assets/levels/" + Name));
+        lv = new LevelData(m);
+        lv.fileName = Name;
+        return lv;
+    }
+
+    /**
+     * Builds a Way from a JavaFX Polyline node and an offset. The
+     * polyline points are interleaved x,y doubles.
+     * @p PolylineNodeAjo is an AussomJavaObject around a Polyline.
+     * @p OffsetX is the X offset added to every point.
+     * @p OffsetY is the Y offset added to every point.
+     * @r A new Way wrapper.
+     */
+    public wayFromPolyline(object PolylineNodeAjo, double OffsetX, double OffsetY) {
+        pts = PolylineNodeAjo.invokeRaw("getPoints");
+        n = pts.invoke("size");
+        list = [];
+        i = 0;
+        while (i < n) {
+            x = pts.invoke("get", i) + OffsetX;
+            y = pts.invoke("get", i + 1) + OffsetY;
+            list.add(new Vec2(x, y));
+            i = i + 2;
+        }
+        return new Way(list);
+    }
+}

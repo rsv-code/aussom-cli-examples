@@ -1,0 +1,122 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * TestFX-driven verification for the Aussom port of the FXGLGames
+ * "Bomberman" demo. Launches a real headless FXGL game using
+ * BombermanApp's lifecycle wiring, drives the game loop for a short
+ * window, and asserts on the captured state.
+ */
+
+include aunit;
+include fxgl;
+include testfx;
+include bomberman;
+
+@Test(name = "Bomberman -- FXGL game port")
+class bombermanTest : test {
+    public game = null;
+    public app = null;
+    public elapsed = 0.0;
+    public phase = 0;
+
+    /* Captured state. */
+    public initialEntityCount = -1;
+    public wallCount = -1;
+    public brickCount = -1;
+    public bgCount = -1;
+    public playerCount = -1;
+    public gridBuilt = false;
+    public playerAttached = false;
+    public initialMaxBombs = -1;
+    public maxBombsAfterPickup = -1;
+    public brickCountBeforeBomb = -1;
+    public brickCountAfterBomb = -1;
+    public bombsAfterPlace = -1;
+
+    @Before
+    public runBefore() {
+        testfx.setHeadless(true);
+        this.game = new BombermanApp();
+        this.app = this.game.build("Bomberman Test");
+        this.app.onUpdate(::onUpdate);
+        this.app.launch();
+    }
+
+    public onUpdate(tpf) {
+        this.elapsed = this.elapsed + tpf;
+
+        if (this.phase == 0 && this.elapsed > 0.5) {
+            this.phase = 1;
+            this.initialEntityCount = this.game.world.getEntityCount();
+            this.wallCount = this.game.world.getEntitiesByType(["WALL"]).size();
+            this.brickCount = this.game.world.getEntitiesByType(["BRICK"]).size();
+            this.bgCount = this.game.world.getEntitiesByType([]).size();
+            this.playerCount = this.game.world.getEntitiesByType(["PLAYER"]).size();
+            this.gridBuilt = (this.game.grid != null);
+            this.playerAttached = (this.game.player != null);
+            if (this.playerAttached) {
+                this.initialMaxBombs = this.game.player.maxBombs;
+                this.game.player.increaseMaxBombs();
+                this.maxBombsAfterPickup = this.game.player.maxBombs;
+            }
+
+            // Exercise the actual placeBomb chain (player -> app -> spawnBomb)
+            // so a TILE_SIZE/2 type-promotion regression on the radius
+            // arg is caught here, not by playtesting the F key.
+            if (this.playerAttached) {
+                this.game.doPlaceBomb();
+                this.bombsAfterPlace = this.game.world
+                    .getEntitiesByType(["BOMB"]).size();
+            }
+
+            // Drop a bomb manually next to a known brick and explode it.
+            this.brickCountBeforeBomb = this.brickCount;
+            bomb = this.game.spawnBomb(40, 0, 20);
+            if (bomb != null) { bomb.explode(); }
+            this.brickCountAfterBomb = this.game.world.getEntitiesByType(["BRICK"]).size();
+        }
+
+        if (this.elapsed > 1.5) { this.app.exit(); }
+    }
+
+    /*
+     * Assertions
+     */
+
+    @Test(name = "(level) text level loaded with the expected wall count.")
+    public wallCountMatches() { return this.expect(this.wallCount, 49); }
+
+    @Test(name = "(level) text level loaded with the expected brick count.")
+    public brickCountMatches() { return this.expect(this.brickCount, 26); }
+
+    @Test(name = "(player) player entity spawned exactly once.")
+    public playerSpawned() { return this.expect(this.playerCount, 1); }
+
+    @Test(name = "(player) PlayerController attached to the live entity.")
+    public playerAttachedOk() { return this.expect(this.playerAttached, true); }
+
+    @Test(name = "(grid) AStarGrid built from the world.")
+    public gridOk() { return this.expect(this.gridBuilt, true); }
+
+    @Test(name = "(player) max bombs starts at 1.")
+    public maxBombsStart() { return this.expect(this.initialMaxBombs, 1); }
+
+    @Test(name = "(powerup) increasing max bombs increments the cap.")
+    public maxBombsBump() { return this.expect(this.maxBombsAfterPickup, 2); }
+
+    @Test(name = "(bomb) detonating a bomb removes adjacent bricks.")
+    public explodeRemovesBricks() {
+        // Guard against an exception in the explode -> onBrickDestroyed
+        // chain leaving brickCountAfterBomb at its -1 sentinel (which
+        // would still pass `< brickCountBeforeBomb`).
+        return this.expect(
+            this.brickCountAfterBomb >= 0
+            && this.brickCountAfterBomb < this.brickCountBeforeBomb,
+            true);
+    }
+
+    @Test(name = "(bomb) placeBomb path produces exactly one bomb entity.")
+    public placeBombSpawnsBomb() {
+        return this.expect(this.bombsAfterPlace, 1);
+    }
+}

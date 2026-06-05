@@ -1,0 +1,868 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Title-screen and in-game pause menus for the Tower Defense port.
+ *
+ *   MenuButton             - clickable VBox holding a polygon
+ *                            background and a centered text label.
+ *                            Each button takes a click callback;
+ *                            stylistic hover/disable bindings from
+ *                            the original Java MenuButton are not
+ *                            wrapped, so the buttons paint flat
+ *                            colors instead of property bindings.
+ *
+ *   TowerDefenseMainMenu   - title-screen menu shown on startup.
+ *                            Subclasses FXGLDefaultMenu so the
+ *                            underlying Java object is concrete
+ *                            (FXGLMenu itself is abstract). Adds
+ *                            a dark background, a title text, and
+ *                            two buttons: PLAY and EXIT.
+ *
+ *   TowerDefenseGameMenu   - in-game pause menu. Two buttons:
+ *                            RESUME and MAIN MENU.
+ *
+ *   TDSceneFactory         - wires the two menus through the
+ *                            engine's SceneFactory bridge.
+ */
+
+include fxgl;
+include fxgl.FXGLDefaultMenu;
+include fxgl.MenuType;
+include fxgl.SceneFactory;
+include fxgl.FXGLScrollPane;
+include fxgl.Bindings;
+include fxgl.DialogService;
+include fxgl.GameController;
+include fx.Button;
+include fxgl.GameSubScene;
+include fxgl.GameWorld;
+include fxgl.Entity;
+include fxgl.EntityFactory;
+include fxgl.TMXLevelLoader;
+include fxgl.Images;
+include fxgl.Viewport;
+include fxgl.Executor;
+include fxgl.FXGLAssetLoaderService;
+include fx.GridPane;
+include fx.StackPane;
+include fx.ImageView;
+include file;
+include fx.Group;
+include fx.VBox;
+include fx.Polygon;
+include fx.Rectangle;
+include fx.Circle;
+include fx.Text;
+include fx.Color;
+include fx.LinearGradient;
+include fx.Stop;
+include data;
+include currency;
+include ui;
+include gametext;
+
+/**
+ * Two-circle gold coin icon used inside CurrencyView. Mirrors
+ * the original CurrencyIcon: an outer yellow disc with a black
+ * outline plus a smaller brighter inner disc.
+ */
+class CurrencyIcon {
+    /** The visual root (fx.Group). */
+    public root = null;
+
+    public CurrencyIcon() {
+        this.root = new Group();
+
+        outer = new Circle(0.0, 0.0, 20.0);
+        outer.setFill(new Color("#FFFF00"));
+        outer.setStroke(new Color("#000000"));
+        outer.setStrokeWidth(4.0);
+        this.root.add(outer);
+
+        inner = new Circle(0.0, -4.0, 11.0);
+        inner.setFill(new Color("#FFFF66"));
+        inner.setStroke(new Color("#000000"));
+        inner.setStrokeWidth(2.0);
+        this.root.add(inner);
+    }
+}
+
+/**
+ * Compact persistence-currency badge shown on the main menu. A
+ * rounded gray panel + CurrencyIcon + count text. The original
+ * binds the count to CurrencyService.currencyProperty; here the
+ * service is a plain class (registering an Aussom-defined
+ * EngineService is a wrapper gap), so the value is read once at
+ * construction.
+ */
+class CurrencyView {
+    /** The visual root (fx.Group). */
+    public root = null;
+
+    public CurrencyView() {
+        this.root = new Group();
+
+        bg = new Rectangle(0.0, 0.0, 100.0, 34.0);
+        bg.setFill(new Color("#808080", 0.75));
+        bg.setStroke(new Color("#000000", 0.9));
+        bg.setStrokeWidth(2.5);
+        bg.setArcWidth(10.0);
+        bg.setArcHeight(10.0);
+        this.root.add(bg);
+
+        icon = new CurrencyIcon();
+        icon.root.setTranslateX(15.0);
+        icon.root.setTranslateY(17.0);
+        this.root.add(icon.root);
+
+        // Original binds text.textProperty() to
+        // CurrencyService.currencyProperty().asString(). Mirror that.
+        text = new Text(55.0, 25.0, "0");
+        text.setFill(new Color("#FFFFFF"));
+        GameText.applyUIFont(text, 22.0);
+        svc = fxgl.getAussomService("CurrencyService");
+        if (svc != null) {
+            text.textProperty().invoke("bind", svc.currencyProperty().asString());
+        }
+        this.root.add(text);
+    }
+}
+
+/**
+ * Clickable rectangle-shaped menu button. The bg is a simple
+ * filled Polygon so the button matches the angled shape used in
+ * the original; the hover / disabled bindings from the original
+ * are skipped (the JavaFX property bindings used there are not
+ * wrapped yet).
+ */
+class MenuButton {
+    /** The visual root (fx.Group). */
+    public root = null;
+    /** Mirror of `root.obj`. */
+    public obj = null;
+    /** The click callback. */
+    public action = null;
+
+    /**
+     * @p Name is the button label.
+     * @p Action is a callback invoked on click. Takes no args.
+     */
+    public MenuButton(string Name, callback Action) {
+        this.action = Action;
+        this.root = new Group();
+
+        bg = new Polygon();
+        bg.addPoints([0.0, 0.0, 200.0, 0.0, 200.0, 25.0, 190.0, 40.0, 0.0, 40.0]);
+        bg.setStrokeWidth(2.5);
+        // hoverProperty() bindings: gold stroke + dark-orange fill on
+        // hover, transparent otherwise. otherwise() returns the
+        // binding AJO directly, suitable for .bind().
+        hoverFill = Bindings.when(this.root.hoverProperty())
+            .then(new Color("#FF8C00"))
+            .otherwise(new Color("#000000", 0.0));
+        hoverStroke = Bindings.when(this.root.hoverProperty())
+            .then(new Color("#FFD700"))
+            .otherwise(new Color("#000000", 0.0));
+        bg.fillProperty().invoke("bind", hoverFill);
+        bg.strokeProperty().invoke("bind", hoverStroke);
+        this.root.add(bg);
+
+        text = new Text(15.0, 28.0, Name);
+        GameText.applyGameFont(text, 26.0);
+        // The original Java MenuButton uses a nested binding:
+        //   when(disableProperty) -> GRAY
+        //   else when(pressedProperty) -> YELLOWGREEN
+        //   else WHITE
+        // The nested-binding form (otherwise() taking another
+        // ObservableValue) fails to bind to fillProperty in the
+        // current wrapper -- Java NPEs on the inner ObservableValue
+        // when JavaFX evaluates the outer Color/Paint conditional.
+        // Until the wrapper's chained-otherwise path is sorted, use
+        // the simpler pressed-only binding (white otherwise) -- the
+        // disabled state of a top-level menu button is never set
+        // in TD's actual UI flow.
+        pressedFill = Bindings.when(this.root.pressedProperty())
+            .then(new Color("#9ACD32"))
+            .otherwise(new Color("#FFFFFF"));
+        text.fillProperty().invoke("bind", pressedFill);
+        this.root.add(text);
+
+        this.root.setOnMouseClicked(::onClicked);
+        this.obj = this.root.obj;
+    }
+
+    /**
+     * Click handler — fires the registered action.
+     * @p Event is the JavaFX MouseEvent AJO.
+     */
+    public onClicked(object Event) {
+        this.action.call();
+    }
+}
+
+/**
+ * One row inside LevelSelectionBox: a clickable polygon-shaped
+ * label that highlights when selected. Mirrors the original
+ * `LevelSelectionBox.MenuItem` inner class.
+ */
+class LevelMenuItem {
+    /** The visual root (fx.Group). */
+    public root = null;
+    /** The LevelData this row represents. */
+    public data = null;
+    /** The shaped background polygon (re-fills when selected). */
+    public bg = null;
+    /** Owning box, used to dispatch selection. */
+    public box = null;
+
+    /**
+     * @p Box is the owning LevelSelectionBox.
+     * @p LevelDataObj is the LevelData this row represents.
+     */
+    public LevelMenuItem(object Box, object LevelDataObj) {
+        this.box = Box;
+        this.data = LevelDataObj;
+        this.root = new Group();
+
+        this.bg = new Polygon();
+        this.bg.addPoints([0.0, 0.0, 200.0, 0.0, 200.0, 25.0, 190.0, 40.0, 0.0, 40.0]);
+        this.bg.setStrokeWidth(2.5);
+        this.root.add(this.bg);
+
+        text = new Text(15.0, 28.0, LevelDataObj.name);
+        GameText.applyGameFont(text, 26.0);
+        // Match the original LevelSelectionBox.MenuItem: text turns
+        // yellow-green while the row is being pressed.
+        pressedFill = Bindings.when(this.root.pressedProperty())
+            .then(new Color("#9ACD32"))
+            .otherwise(new Color("#FFFFFF"));
+        text.fillProperty().invoke("bind", pressedFill);
+        this.root.add(text);
+
+        this.root.setOnMouseClicked(::onClicked);
+        this.setSelected(false);
+    }
+
+    /** Click handler: tells the owning box to select this row. */
+    public onClicked(object Event) { this.box.select(this); }
+
+    /**
+     * Paints the polygon gold when selected, transparent otherwise.
+     * @p Selected is the new selection state.
+     */
+    public setSelected(bool Selected) {
+        if (Selected) {
+            this.bg.setFill(new Color("#FFD700"));
+            this.bg.setStroke(new Color("#FF8C00"));
+        } else {
+            this.bg.setFill(new Color("#000000", 0.0));
+            this.bg.setStroke(new Color("#000000", 0.0));
+        }
+    }
+}
+
+/**
+ * Vertical list of LevelMenuItems. The currently selected item is
+ * highlighted; click on a row to change the selection. Callers can
+ * register an `onSelect` callback to receive the picked LevelData.
+ */
+class LevelSelectionBox {
+    /** The visual root (fx.VBox). */
+    public root = null;
+    /** The LevelMenuItem rows. */
+    public items = [];
+    /** Currently selected item, or null when none. */
+    public selected = null;
+    /** Callback fired on each selection change, taking LevelData. */
+    public onSelectCb = null;
+
+    /**
+     * @p Levels is a list of LevelData wrappers to show.
+     */
+    public LevelSelectionBox(list Levels) {
+        this.root = new VBox();
+        this.root.setSpacing(-20.0);
+        this.items = [];
+        for (lv : Levels) {
+            mi = new LevelMenuItem(this, lv);
+            this.items.add(mi);
+            this.root.add(mi.root);
+        }
+        if (this.items.size() > 0) {
+            this.select(this.items[0]);
+        }
+    }
+
+    /**
+     * @p Cb is a callback that takes the newly selected LevelData.
+     */
+    public onSelect(callback Cb) { this.onSelectCb = Cb; }
+
+    /**
+     * Selects the given item, clearing the prior selection.
+     * @p Item is the LevelMenuItem to select.
+     */
+    public select(object Item) {
+        if (this.selected != null) { this.selected.setSelected(false); }
+        this.selected = Item;
+        this.selected.setSelected(true);
+        if (this.onSelectCb != null) {
+            this.onSelectCb.call(Item.data);
+        }
+    }
+
+    /** @r The currently selected LevelData. */
+    public getSelectedLevel() {
+        if (this.selected == null) { return null; }
+        return this.selected.data;
+    }
+}
+
+/**
+ * Half-size preview of the currently-selected level's TMX map.
+ * Holds an ImageView wrapped in a rounded transparent outline.
+ * `setImage(imageAjo)` swaps in a new snapshot.
+ */
+class MapPreview {
+    /** The visual root (fx.Group). */
+    public root = null;
+    /** The ImageView that displays the rendered map. */
+    public view = null;
+
+    /**
+     * @p Width is the preview width in pixels.
+     * @p Height is the preview height in pixels.
+     */
+    public MapPreview(double Width, double Height) {
+        this.root = new Group();
+
+        this.view = new ImageView();
+        this.view.setFitWidth(Width);
+        this.view.setFitHeight(Height);
+        this.root.add(this.view);
+
+        bg = new Rectangle(0.0, 0.0, Width, Height);
+        bg.setFill(new Color("#000000", 0.0));
+        bg.setStroke(new Color("#FFFFE0"));
+        bg.setStrokeWidth(2.5);
+        bg.setArcWidth(15.0);
+        bg.setArcHeight(15.0);
+        this.root.add(bg);
+    }
+
+    /**
+     * Swaps the displayed image.
+     * @p ImageAjo is an AussomJavaObject around a javafx.scene.image.Image.
+     */
+    public setImage(object ImageAjo) {
+        this.view.obj.invoke("setImage", ImageAjo);
+    }
+}
+
+/**
+ * Title-screen menu. Subclasses the engine's concrete default
+ * menu (FXGLMenu is abstract). Layout mirrors the original:
+ *  - dark-gray full-screen background
+ *  - left sidebar panel (250 px wide, x=80) with the title image,
+ *    five MenuButtons (Levels / Runes / Upgrades / Settings / Exit),
+ *    and a version label at the bottom
+ *  - right content panel that swaps when a sidebar button is
+ *    clicked: Levels shows the LevelSelectionBox + MapPreview +
+ *    Play button; Runes shows a 3x9 placeholder grid; Upgrades
+ *    shows the six tower icons; Settings pops a TODO dialog;
+ *    Exit quits the application
+ *  - CurrencyView in the top-right corner.
+ */
+class TowerDefenseMainMenu : FXGLDefaultMenu {
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+    /** Level selection list (lives inside the Levels view). */
+    public selectBox = null;
+    /** Live MapPreview pane (lives inside the Levels view). */
+    public mapPreview = null;
+    /** Cached rendered images keyed by TMX file name. */
+    public previewCache = {};
+    /** Right-side content surface — children swap on sidebar click. */
+    public contentBox = null;
+    /** The default "Levels" content (HBox + Play button group). */
+    public levelsContent = null;
+    /** Pre-built RunesView for the "Runes" sidebar option. */
+    public runesContent = null;
+    /** Pre-built UpgradesView for the "Upgrades" sidebar option. */
+    public upgradesContent = null;
+    /** The CSS-styled Play button shown inside the Levels view. */
+    public playButton = null;
+
+    /** Test seam: last message Settings would have shown. */
+    public lastSettingsMessage = null;
+    /** Test seam: last prompt Exit would have shown. */
+    public lastExitConfirmPrompt = null;
+
+    /**
+     * @p AppRef is the TowerDefenseApp the menu writes the
+     *    selected level into before starting the game.
+     */
+    public TowerDefenseMainMenu(object AppRef) {
+        this.FXGLDefaultMenu(MenuType.MAIN_MENU());
+        this.app = AppRef;
+
+        w = fxgl.getAppWidth() * 1.0;
+        h = fxgl.getAppHeight() * 1.0;
+
+        // ---- backgrounds ----
+        bg = new Rectangle(0.0, 0.0, w, h);
+        bg.setFill(new Color("#A9A9A9"));
+        this.addChild(bg);
+
+        stops = [
+            new Stop(0.1, new Color("#195933", 0.15)),
+            new Stop(0.5, new Color("#19A633", 0.95)),
+            new Stop(0.9, new Color("#195933", 0.15))
+        ];
+        gradient = new LinearGradient(0.5, 0.0, 0.5, 1.0, true, "NO_CYCLE", stops);
+
+        leftPanelX = 80.0;
+        leftPanelW = 250.0;
+        rightPanelX = leftPanelX + leftPanelW + 80.0;
+        rightPanelW = w - leftPanelX - leftPanelW - 80.0 - 80.0;
+
+        bgInnerLeft = new Rectangle(0.0, 0.0, leftPanelW, h + 2.0);
+        bgInnerLeft.setFill(gradient);
+        bgInnerLeft.setStrokeWidth(1.5);
+        bgInnerLeft.setStroke(new Color("#90EE90"));
+        bgInnerLeft.setTranslateX(leftPanelX);
+        this.addChild(bgInnerLeft);
+
+        bgInnerRight = new Rectangle(0.0, 0.0, rightPanelW, h + 2.0);
+        bgInnerRight.setFill(gradient);
+        bgInnerRight.setStrokeWidth(1.5);
+        bgInnerRight.setStroke(new Color("#90EE90"));
+        bgInnerRight.setTranslateX(rightPanelX);
+        this.addChild(bgInnerRight);
+
+        // ---- title image at top of left panel ----
+        titleTex = AppRef.loadTex("title.png");
+        titleTex.setTranslateX(leftPanelX + 8.0);
+        titleTex.setTranslateY(40.0);
+        this.addChild(titleTex);
+
+        // ---- right-side content surface ----
+        this.contentBox = new Group();
+        this.contentBox.setTranslateX(rightPanelX + 25.0);
+        this.contentBox.setTranslateY(220.0);
+        this.addChild(this.contentBox);
+
+        // Build all sub-views up front; switching is fast.
+        levelNames = ["level1.json", "level2.json", "level3.json", "level4.json"];
+        levels = [];
+        for (n : levelNames) { levels.add(Data.loadLevel(n)); }
+        this.selectBox = new LevelSelectionBox(levels);
+        this.selectBox.onSelect(::onLevelPicked);
+
+        scroll = new FXGLScrollPane(this.selectBox.root);
+        scroll.setPrefSize(220.0, h / 2.0);
+        scroll.setHBarPolicy("NEVER");
+
+        previewW = w / 2.0;
+        previewH = h / 2.0;
+        this.mapPreview = new MapPreview(previewW, previewH);
+
+        levelsRow = new HBox();
+        levelsRow.setSpacing(20.0);
+        levelsRow.add(scroll);
+        levelsRow.add(this.mapPreview.root);
+
+        // The original Play button is a real javafx.scene.control
+        // .Button styled by the `play_button` CSS rule (loaded from
+        // main.css), not a custom polygon-MenuButton.
+        this.playButton = new Button(" Play ");
+        styleClass = this.playButton.obj.invokeRaw("getStyleClass");
+        styleClass.invoke("add", "play_button");
+        this.playButton.onClick(::onPlayClicked);
+        this.playButton.setTranslateX(rightPanelW / 2.0 - 100.0);
+        this.playButton.setTranslateY(h / 2.0 + 50.0);
+
+        this.levelsContent = new Group();
+        this.levelsContent.add(levelsRow);
+        this.levelsContent.add(this.playButton);
+
+        this.runesContent = new RunesView();
+        this.upgradesContent = new UpgradesView(AppRef);
+
+        // Pre-render the initial level's preview so it's already
+        // warm when the user opens the Levels view. The right
+        // panel itself stays empty until a sidebar button is
+        // clicked, matching the original.
+        sel = this.selectBox.getSelectedLevel();
+        if (sel != null) { this.showLevelPreview(sel); }
+
+        // ---- left-side menu sidebar ----
+        sideMenu = new VBox();
+        sideMenu.setSpacing(0 - 15.0);
+        sideMenu.add(new MenuButton("Levels",   ::showLevels).root);
+        sideMenu.add(new MenuButton("Runes",    ::showRunes).root);
+        sideMenu.add(new MenuButton("Upgrades", ::showUpgrades).root);
+        sideMenu.add(new MenuButton("Settings", ::showSettings).root);
+        sideMenu.add(new MenuButton("Exit",     ::onExit).root);
+        sideMenu.setTranslateX(leftPanelX + 15.0);
+        sideMenu.setTranslateY(250.0);
+        this.addChild(sideMenu);
+
+        // ---- version label at bottom of left panel ----
+        // Mirror the original: pull the active version from
+        // GameSettings rather than hard-coding it.
+        verStr = "0.4";
+        try {
+            verStr = fxgl.getSettings().obj.invoke("getVersion");
+        } catch (e) {}
+        version = new Text(leftPanelX + 10.0, h - 5.0, verStr);
+        version.setFill(new Color("#FAEBD7"));
+        GameText.applyMonoFont(version, 12.0);
+        this.addChild(version);
+
+        // ---- currency view top-right ----
+        cv = new CurrencyView();
+        cv.root.setTranslateX(w - 300.0);
+        cv.root.setTranslateY(15.0);
+        this.addChild(cv.root);
+
+        // Apply the same file-based main.css to this menu's
+        // content root so the Play button and any styled text
+        // pick up the FXGL theme exactly like the in-game scene.
+        try {
+            cssUrl = "file://" + AppRef.cwd + "/assets/ui/css/main.css";
+            cr = this.getContentRoot();
+            cr.invokeRaw("getStylesheets").invoke("add", cssUrl);
+        } catch (e) {}
+    }
+
+    /**
+     * Replaces the contentBox children with the supplied node.
+     * @p Node is the wrapper whose .obj is added.
+     */
+    public setContent(object Node) {
+        children = this.contentBox.obj.invokeRaw("getChildren");
+        children.invoke("clear");
+        children.invoke("add", Node.obj);
+    }
+
+    /** Sidebar button: switch the right panel to the Levels view. */
+    public showLevels()   { this.setContent(this.levelsContent); }
+    /** Sidebar button: switch the right panel to the Runes view. */
+    public showRunes()    { this.setContent(this.runesContent.root); }
+    /** Sidebar button: switch the right panel to the Upgrades view. */
+    public showUpgrades() { this.setContent(this.upgradesContent.root); }
+
+    /** Sidebar button: pop a not-implemented dialog for Settings. */
+    public showSettings() {
+        this.lastSettingsMessage = "TODO: not implemented";
+        ds = fxgl.getDialogService();
+        ds.showMessageBox(this.lastSettingsMessage, ::noop);
+    }
+
+    /**
+     * Test-only helper: record what Settings / Exit would have
+     * shown without actually popping the modal dialog. The live
+     * dialogs would block the headless game loop forever.
+     */
+    public dryRunDialogs() {
+        this.lastSettingsMessage = "TODO: not implemented";
+        this.lastExitConfirmPrompt = "Exit the game?";
+    }
+
+    /** No-op dialog dismiss callback. */
+    public noop() {}
+
+    /**
+     * fx.Button onClick callback — gets the JavaFX MouseEvent. We
+     * ignore it and delegate to onPlay so we can share the same
+     * "start the chosen level" code path with non-button callers.
+     * @p Event is the MouseEvent AJO.
+     */
+    public onPlayClicked(object Event) { this.onPlay(); }
+
+    /** Starts a new game using the selected level. */
+    public onPlay() {
+        sel = this.selectBox.getSelectedLevel();
+        if (sel != null) { this.app.selectedLevelName = sel.fileName; }
+        gc = new GameController();
+        gc.obj = fxgl.getGameController();
+        gc.startNewGame();
+    }
+
+    /**
+     * Level-selection listener: kick off a fresh map preview render
+     * for the picked level. Driven by LevelSelectionBox.onSelect.
+     */
+    public onLevelPicked(object LevelDataObj) {
+        this.showLevelPreview(LevelDataObj);
+    }
+
+    /**
+     * Renders (or recovers from cache) the level's TMX map into the
+     * MapPreview ImageView. Matches the original
+     * `TowerDefenseMainMenu.showLevelPreview`: build a half-size
+     * GameSubScene, load the TMX into it, snapshot the scene's
+     * content root via Images.toImage, then push the result to the
+     * preview on the JavaFX thread through Executor.startAsyncFX.
+     * @p LevelDataObj is the LevelData to render.
+     */
+    public showLevelPreview(object LevelDataObj) {
+        mapName = LevelDataObj.map;
+        if (this.previewCache.containsKey(mapName)) {
+            this.pendingImage = this.previewCache[mapName];
+            fxgl.getExecutor().startAsyncFX(::pushPending);
+            return null;
+        }
+
+        cwd = file.getCanonicalPath(".");
+        subW = fxgl.getAppWidth();
+        subH = fxgl.getAppHeight();
+        sub = new GameSubScene(subW, subH, false);
+
+        // Half-scale zoom on the sub-scene's viewport so the
+        // 25x14 tile map fits the half-app preview pane.
+        gameSceneAjo = sub.getGameScene();
+        viewport = new Viewport();
+        viewport.obj = gameSceneAjo.invokeRaw("getViewport");
+        viewport.setZoom(0.5);
+
+        // sub.getGameWorld() returns a raw AJO; adopt it so we get
+        // the wrapper's addEntityFactory / setLevel methods.
+        world = new GameWorld();
+        world.obj = sub.getGameWorld();
+
+        factory = fxgl.entityFactory();
+        factory.addSpawner("waypoint", ::makePreviewWaypoint);
+        factory.addSpawner("towerBase", ::makePreviewTowerBase);
+        factory.attachTo(world);
+
+        loader = new TMXLevelLoader();
+        lvl = loader.load("file://" + cwd + "/assets/levels/tmx/" + mapName, world);
+        world.setLevel(lvl);
+
+        // Snapshot the rendered scene; cache so we don't redo it.
+        contentRoot = gameSceneAjo.invokeRaw("getContentRoot");
+        img = Images.toImage(contentRoot);
+        this.previewCache[mapName] = img;
+        this.pendingImage = img;
+        fxgl.getExecutor().startAsyncFX(::pushPending);
+    }
+
+    /** Holding slot for the image waiting to be installed on the FX thread. */
+    public pendingImage = null;
+
+    /** Async-FX callback: hands the latest image to the MapPreview. */
+    public pushPending() {
+        if (this.pendingImage != null && this.mapPreview != null) {
+            this.mapPreview.setImage(this.pendingImage);
+        }
+    }
+
+    /** TMX waypoint spawner for the preview sub-scene. */
+    public makePreviewWaypoint(object Data) {
+        e = new Entity();
+        e.setPosition(Data.getX(), Data.getY());
+        return e;
+    }
+
+    /** TMX towerBase spawner for the preview sub-scene (green cell). */
+    public makePreviewTowerBase(object Data) {
+        e = new Entity();
+        e.setPosition(Data.getX(), Data.getY());
+        rect = new Rectangle(0.0, 0.0, 64.0, 64.0);
+        rect.setFill(new Color("#008000", 0.25));
+        e.addViewNode(rect);
+        return e;
+    }
+
+    /**
+     * Pops a confirmation dialog before quitting. Matches the
+     * original FXGL `fireExit()` behavior — those `fire*` methods
+     * are protected on the Java FXGLMenu, so we replicate the
+     * "Are you sure?" prompt manually via the DialogService.
+     */
+    public onExit() {
+        this.lastExitConfirmPrompt = "Exit the game?";
+        ds = fxgl.getDialogService();
+        ds.showConfirmationBox(this.lastExitConfirmPrompt, ::onExitConfirmed);
+    }
+
+    /**
+     * Dialog response handler. Quits when the user confirms.
+     * @p Yes is true when the user clicked Yes.
+     */
+    public onExitConfirmed(bool Yes) {
+        if (Yes) {
+            gc = new GameController();
+            gc.obj = fxgl.getGameController();
+            gc.exit();
+        }
+    }
+}
+
+/**
+ * In-game pause menu. Two buttons: RESUME and MAIN MENU.
+ */
+class TowerDefenseGameMenu : FXGLDefaultMenu {
+    /** Holds the cwd for the file:// CSS URL. */
+    public cwd = ".";
+
+    /**
+     * Builds the menu and populates its content root.
+     */
+    public TowerDefenseGameMenu() {
+        this.FXGLDefaultMenu(MenuType.GAME_MENU());
+
+        w = fxgl.getAppWidth() * 1.0;
+        h = fxgl.getAppHeight() * 1.0;
+
+        bg = new Rectangle(0.0, 0.0, w, h);
+        bg.setFill(new Color("#000000", 0.5));
+        this.addChild(bg);
+
+        // Match the original Java game-menu: real fx.Buttons styled
+        // by the `play_button` CSS rule, stacked centered.
+        btnResume = new Button("Resume");
+        styleClass = btnResume.obj.invokeRaw("getStyleClass");
+        styleClass.invoke("add", "play_button");
+        btnResume.onClick(::onResumeClicked);
+        btnResume.setTranslateX(w / 2.0 - 100.0);
+        btnResume.setTranslateY(h / 2.0 - 60.0);
+        this.addChild(btnResume);
+
+        btnExit = new Button("Main Menu");
+        styleClassExit = btnExit.obj.invokeRaw("getStyleClass");
+        styleClassExit.invoke("add", "play_button");
+        btnExit.onClick(::onMainMenuClicked);
+        btnExit.setTranslateX(w / 2.0 - 100.0);
+        btnExit.setTranslateY(h / 2.0 + 20.0);
+        this.addChild(btnExit);
+
+        try {
+            cssUrl = "file://" + file.getCanonicalPath(".") + "/assets/ui/css/main.css";
+            cr = this.getContentRoot();
+            cr.invokeRaw("getStylesheets").invoke("add", cssUrl);
+        } catch (e) {}
+    }
+
+    /** fx.Button click handler -- forwards to onResume. */
+    public onResumeClicked(object Event) { this.onResume(); }
+    /** fx.Button click handler -- forwards to onMainMenu. */
+    public onMainMenuClicked(object Event) { this.onMainMenu(); }
+
+    /** Resumes the running game. */
+    public onResume() {
+        gc = new GameController();
+        gc.obj = fxgl.getGameController();
+        gc.gotoPlay();
+    }
+
+    /** Returns to the title screen. */
+    public onMainMenu() {
+        gc = new GameController();
+        gc.obj = fxgl.getGameController();
+        gc.gotoMainMenu();
+    }
+}
+
+/**
+ * Horizontal row of TowerIcons, one per tower in the catalog.
+ * Shown on the main menu as a preview of available towers. The
+ * original places this beneath the level selector.
+ */
+class UpgradesView {
+    /** The visual root (fx.HBox). */
+    public root = null;
+
+    /**
+     * @p App is the TowerDefenseApp (for texture loading).
+     */
+    public UpgradesView(object App) {
+        this.root = new HBox();
+        this.root.setSpacing(20.0);
+        names = ["tower1.json", "tower2.json", "tower3.json",
+                 "tower4.json", "tower5.json", "tower6.json"];
+        for (n : names) {
+            td = Data.loadTower(n);
+            ti = new TowerIcon(App, td, null);
+            this.root.add(ti.root);
+        }
+    }
+}
+
+/**
+ * Placeholder grid of 27 rune slots (3x9), each a 100x100 StackPane
+ * holding a rounded background and a "???" label. Matches the
+ * original's GridPane / StackPane layout.
+ */
+class RunesView {
+    /** The visual root (fx.GridPane). */
+    public root = null;
+
+    public RunesView() {
+        this.root = new GridPane();
+        this.root.setHgap(10.0);
+        this.root.setVgap(10.0);
+        y = 0;
+        while (y < 3) {
+            x = 0;
+            while (x < 9) {
+                this.root.add(this.makeSlot("???"), x, y);
+                x = x + 1;
+            }
+            y = y + 1;
+        }
+    }
+
+    /**
+     * @p Name is the slot label.
+     * @r An fx.StackPane holding the slot background + label.
+     */
+    public makeSlot(string Name) {
+        sp = new StackPane();
+        bg = new Rectangle(0.0, 0.0, 100.0, 100.0);
+        bg.setFill(new Color("#F0F8FF"));
+        bg.setStroke(new Color("#000000"));
+        bg.setStrokeWidth(2.5);
+        bg.setArcWidth(10.0);
+        bg.setArcHeight(10.0);
+        sp.add(bg);
+        lbl = new Text(0.0, 0.0, Name);
+        lbl.setFill(new Color("#000000"));
+        sp.add(lbl);
+        return sp;
+    }
+}
+
+/**
+ * SceneFactory bridge: produces the TD main / game menus, with
+ * the app reference threaded into each so menu actions can call
+ * back into the running game.
+ */
+class TDSceneFactory {
+    /** The underlying SceneFactory wrapper. */
+    public factory = null;
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+
+    /**
+     * @p AppRef is the TowerDefenseApp used by menu callbacks.
+     */
+    public TDSceneFactory(object AppRef) {
+        this.app = AppRef;
+        this.factory = new SceneFactory();
+        this.factory.onMainMenu(::makeMainMenu);
+        this.factory.onGameMenu(::makeGameMenu);
+    }
+
+    /**
+     * @r A new TowerDefenseMainMenu bound to the app.
+     */
+    public makeMainMenu() { return new TowerDefenseMainMenu(this.app); }
+
+    /**
+     * @r A new TowerDefenseGameMenu.
+     */
+    public makeGameMenu() { return new TowerDefenseGameMenu(); }
+}

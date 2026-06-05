@@ -61,7 +61,7 @@ class cannonTest : test {
             this.cannonX = this.game.cannon.getX();
             this.initialCannonY = this.game.cannon.getY();
             this.finalCannonY = this.initialCannonY;
-            this.scoreAtStart = this.game.score;
+            this.scoreAtStart = this.game.getScore();
             this.scoreTextExists = (this.game.scoreText != null);
             this.entityCountBeforeBullet = this.game.world.getEntityCount();
             // x=600 sits in the gap between the barriers and over the
@@ -72,7 +72,7 @@ class cannonTest : test {
         }
         this.finalCannonY = this.game.cannon.getY();
         if (this.elapsed > 1.5) {
-            this.finalScore = this.game.score;
+            this.finalScore = this.game.getScore();
             this.app.exit();
         }
     }

@@ -1,0 +1,59 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Persistent progression currency for the Tower Defense main menu.
+ * Registered as an Aussom EngineService via
+ * `GameSettings.addAussomEngineService("CurrencyService")` so the
+ * single instance survives `gotoMainMenu` / `startNewGame` cycles;
+ * any code in the running game can recover it with
+ * `fxgl.getAussomService("CurrencyService")`. Matches the lifetime
+ * of the original Java `CurrencyService` (FXGL EngineService).
+ *
+ * The value is held in a JavaFX IntegerProperty so the main menu's
+ * CurrencyView can bind its text to currencyProperty().asString()
+ * the same way the original does.
+ */
+
+include fx.IntegerProperty;
+
+/**
+ * Holds the player's progression currency between levels.
+ */
+class CurrencyService {
+    /** Backing IntegerProperty so UI can bind to changes. */
+    public prop = null;
+
+    public CurrencyService() {
+        this.prop = new IntegerProperty(0);
+    }
+
+    /** EngineService hook: clear currency when a new game starts. */
+    public onGameReset() {
+        this.prop.set(0);
+    }
+
+    /** @r The current currency value. */
+    public getCurrency() {
+        return this.prop.get();
+    }
+
+    /**
+     * @p Value is the new currency value.
+     */
+    public setCurrency(int Value) {
+        this.prop.set(Value);
+    }
+
+    /**
+     * Adds the given amount to the current currency.
+     * @p Amount is the delta.
+     */
+    public addCurrency(int Amount) {
+        this.prop.set(this.prop.get() + Amount);
+    }
+
+    /**
+     * @r The observable IntegerProperty for bindings.
+     */
+    public currencyProperty() { return this.prop; }
+}

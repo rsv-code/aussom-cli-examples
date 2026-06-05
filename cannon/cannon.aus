@@ -31,6 +31,9 @@ include fxgl.CollisionHandler;
 include fxgl.UserAction;
 include fxgl.Input;
 include fxgl.Vec2;
+include fxgl.UIFactoryService;
+include fx.IntegerProperty;
+include fx.StringProperty;
 
 /**
  * Drives a single bullet: applies the launch velocity once the physics
@@ -92,8 +95,6 @@ class CannonApp {
     public cannon = null;
     /** The score Text wrapper. */
     public scoreText = null;
-    /** The current score. */
-    public score = 0;
     /** Keeps live Bullet controllers reachable. */
     public bullets = [];
 
@@ -130,9 +131,15 @@ class CannonApp {
      * @p Settings is the GameSettings wrapper.
      */
     public onInitSettings(object Settings) {
+        Settings.setVersion("0.2.1");
         Settings.setFileSystemWriteAllowed(false);
         Settings.setUserProfileEnabled(false);
     }
+
+    /**
+     * @r The current score from the FXGL world properties.
+     */
+    public getScore() { return fxgl.geti("score"); }
 
     /**
      * Binds the left mouse button to the shoot action.
@@ -150,7 +157,7 @@ class CannonApp {
      */
     public onInitGame() {
         this.world = fxgl.getGameWorld();
-        this.score = 0;
+        fxgl.set("score", 0);
         fxgl.buildScreenBoundsAndAttach(100.0);
         this.initCannon();
         this.initBasket();
@@ -273,18 +280,30 @@ class CannonApp {
      */
     public onBulletHitBasket(object BulletEntity, object BasketEntity) {
         BulletEntity.removeFromWorld();
-        this.score = this.score + 1000;
-        if (this.scoreText != null) {
-            this.scoreText.setText("Score: [" + this.score + "]");
-        }
+        fxgl.inc("score", 1000);
     }
 
     /**
-     * Builds the score readout in the top-right of the screen.
+     * Builds the score readout in the top-right of the screen. The
+     * label is a UI-factory-produced Text bound to the "score" world
+     * var via IntegerProperty.asString("Score: [%d]"), matching the
+     * original Java bind pattern exactly.
      */
     public onInitUI() {
-        this.scoreText = new Text(550.0, 100.0, "Score: [0]");
-        fxgl.getGameScene().addUINode(this.scoreText);
+        uifac = fxgl.getUIFactoryService();
+        textAjo = uifac.obj.invokeRaw("newText", "", new Color("#000000").obj, 24.0);
+        this.scoreText = new Text();
+        this.scoreText.obj = textAjo;
+
+        scoreProp = new IntegerProperty();
+        scoreProp.obj = fxgl.getip("score");
+        binding = scoreProp.asString("Score: [%d]");
+
+        textProp = new StringProperty();
+        textProp.obj = this.scoreText.textProperty();
+        textProp.bind(binding);
+
+        fxgl.addUINodeAt(this.scoreText, 550.0, 100.0);
     }
 
     /**

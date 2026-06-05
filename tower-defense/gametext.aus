@@ -1,0 +1,78 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Applies FXGL's bundled UI / GAME / MONO fonts to plain fx.Text
+ * widgets. The original TD game routes every label through
+ * `FXGL.getUIFactoryService().newText(message, color, FontType,
+ * size)` so on-screen text picks up FXGL's pixel-art game font.
+ *
+ * The Aussom wrapper's `newFontTyped(FontTypeName, Size)` does the
+ * same lookup against FXGL's FontType slot factory and returns a
+ * raw javafx.scene.text.Font AJO; we copy it onto our fx.Text via
+ * `obj.invoke("setFont", font)`. Wrapped in try/catch so a call
+ * before FXGL has fully initialised falls back to the JavaFX
+ * default font silently.
+ *
+ * Font choices mirror the original Java per call site:
+ *   GAME (Abel-Regular)         -- menu / level rows
+ *   UI   (VarelaRound-Regular)  -- HUD icons + sell label
+ *   MONO (TerminalLandMono)     -- main-menu version label
+ */
+
+include fxgl;
+include fxgl.UIFactoryService;
+include fx.Text;
+
+/**
+ * Static helpers that apply one of FXGL's three bundled fonts
+ * (via UIFactoryService.newFontTyped) to an existing fx.Text
+ * wrapper. Used by `menus.aus` and `ui.aus` for every label
+ * that needs the FXGL look.
+ */
+static class GameText {
+    /**
+     * Sets FXGL's GAME font (Abel-Regular) at the requested size.
+     * @p TextWrap is an fx.Text wrapper.
+     * @p Size is the target font size in points.
+     */
+    public applyGameFont(object TextWrap, double Size) {
+        GameText.applyFontType(TextWrap, "GAME", Size);
+    }
+
+    /**
+     * Sets FXGL's UI font (VarelaRound-Regular) at the requested
+     * size. Used by HUD icons; the original Java uses
+     * `getUIFactoryService().newText(text, color, size)` -- the
+     * 3-arg overload defaults to FontType.UI.
+     * @p TextWrap is an fx.Text wrapper.
+     * @p Size is the target font size in points.
+     */
+    public applyUIFont(object TextWrap, double Size) {
+        GameText.applyFontType(TextWrap, "UI", Size);
+    }
+
+    /**
+     * Sets FXGL's MONO font (TerminalLandMono-Regular) at the
+     * requested size. Used by the main-menu version label.
+     * @p TextWrap is an fx.Text wrapper.
+     * @p Size is the target font size in points.
+     */
+    public applyMonoFont(object TextWrap, double Size) {
+        GameText.applyFontType(TextWrap, "MONO", Size);
+    }
+
+    /**
+     * Looks up the FXGL FontType slot's font via the
+     * UIFactoryService wrapper and applies it to TextWrap.
+     * @p TextWrap is an fx.Text wrapper.
+     * @p FontTypeName is "GAME", "UI", "MONO", or "TEXT".
+     * @p Size is the target font size in points.
+     */
+    public applyFontType(object TextWrap, string FontTypeName, double Size) {
+        try {
+            uifac = fxgl.getUIFactoryService();
+            font = uifac.newFontTyped(FontTypeName, Size);
+            TextWrap.obj.invoke("setFont", font);
+        } catch (e) {}
+    }
+}

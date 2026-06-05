@@ -1,0 +1,533 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Ported to Aussom from the FXGLGames "Bomberman" demo by
+ * Almas Baimagambetov, available at
+ * https://github.com/AlmasB/FXGLGames and used here under the MIT
+ * License. The original game and the FXGL engine are
+ * Copyright (c) 2015 AlmasB (almaslvl@gmail.com).
+ *
+ * Game:
+ * The player moves on a 15x15 grid using WASD. F places a bomb that
+ * explodes after 2 seconds, destroying neighbouring brick tiles
+ * within the bomb's radius. Each destroyed brick has a 50% chance
+ * of dropping a yellow powerup; walking over a powerup increases
+ * the player's max concurrent bomb count by one.
+ *
+ * The level layout comes from `assets/levels/0.txt` (1 = empty char
+ * is '0', 'w' spawns a wall, 'b' spawns a brick). The grid feeds an
+ * AStarGrid for the player's cell-based movement.
+ */
+
+include fxgl;
+include fxgl.GameSettings;
+include fxgl.GameWorld;
+include fxgl.GameScene;
+include fxgl.Entity;
+include fxgl.EntityFactory;
+include fxgl.SpawnData;
+include fxgl.CollidableComponent;
+include fxgl.Component;
+include fxgl.CellMoveComponent;
+include fxgl.AStarMoveComponent;
+include fxgl.AStarGrid;
+include fxgl.AStarCell;
+include fxgl.CellState;
+include fxgl.TextLevelLoader;
+include fxgl.FXGLAssetLoaderService;
+include fxgl.Input;
+include fxgl.UserAction;
+include fxgl.Timer;
+include fxgl.FXGLMath;
+include fxgl.SimpleGameMenu;
+include fxgl.SceneFactory;
+include fx.Rectangle;
+include fx.Color;
+include file;
+
+/**
+ * Drives a single placed bomb. After construction the bomb sits on
+ * the map; calling `explode` finds every BRICK entity intersecting
+ * a square of radius `radius` around the bomb's bounding box,
+ * removes them through the app's `onBrickDestroyed` hook, and
+ * removes the bomb itself.
+ */
+class BombComponent {
+    /** Back-reference to BombermanApp. */
+    public app = null;
+    /** The owning Entity wrapper (set by attachTo). */
+    public entity = null;
+    /** The driving Component wrapper. */
+    public component = null;
+    /** Blast radius in pixels. */
+    public radius = 0;
+
+    /**
+     * @p AppRef is the BombermanApp instance.
+     * @p Radius is the blast radius in pixels.
+     */
+    public BombComponent(object AppRef, int Radius) {
+        this.app = AppRef;
+        this.radius = Radius;
+        this.component = new Component();
+    }
+
+    /**
+     * Attaches the underlying component to the entity.
+     * @p EntityObj is the bomb Entity wrapper.
+     */
+    public attachTo(object EntityObj) {
+        this.entity = EntityObj;
+        EntityObj.addComponent(this.component);
+    }
+
+    /**
+     * Detonates the bomb: notifies the app for every BRICK inside
+     * the blast square, then removes the bomb entity.
+     */
+    public explode() {
+        if (this.entity == null) { return null; }
+        ex = this.entity.getX();
+        ey = this.entity.getY();
+        rx = ex - this.radius;
+        ry = ey - this.radius;
+        rw = 40.0 + this.radius * 2.0;
+        rh = 40.0 + this.radius * 2.0;
+        for (e : this.app.world.getEntitiesByType(["BRICK"])) {
+            bx = e.getX();
+            by = e.getY();
+            if (bx + 40.0 >= rx && bx <= rx + rw
+                && by + 40.0 >= ry && by <= ry + rh) {
+                this.app.onBrickDestroyed(e);
+                e.removeFromWorld();
+            }
+        }
+        this.entity.removeFromWorld();
+    }
+}
+
+/**
+ * Holds the per-player state: how many bombs the player may have
+ * active at once, how many are live right now, plus the
+ * CellMoveComponent / AStarMoveComponent the input handlers drive.
+ */
+class PlayerController {
+    /** Back-reference to BombermanApp. */
+    public app = null;
+    /** The owning Entity wrapper (set by attachTo). */
+    public entity = null;
+    /** Driving Component for the player. */
+    public component = null;
+    /** Grid-aligned movement component. */
+    public cell = null;
+    /** A* pathfinder component bound to the world grid. */
+    public astar = null;
+    /** Max number of bombs the player may have active at once. */
+    public maxBombs = 1;
+    /** Number of bombs currently ticking on the map. */
+    public bombsPlaced = 0;
+
+    /**
+     * @p AppRef is the BombermanApp instance.
+     * @p Cell is the CellMoveComponent the player will drive.
+     * @p Astar is the AStarMoveComponent bound to the world grid.
+     */
+    public PlayerController(object AppRef, object Cell, object Astar) {
+        this.app = AppRef;
+        this.cell = Cell;
+        this.astar = Astar;
+        this.component = new Component();
+    }
+
+    /**
+     * Attaches the controller's components to the player entity.
+     * Order matters: CellMoveComponent before AStarMoveComponent.
+     * @p EntityObj is the player Entity wrapper.
+     */
+    public attachTo(object EntityObj) {
+        this.entity = EntityObj;
+        EntityObj.addComponent(this.cell);
+        EntityObj.addComponent(this.astar);
+        EntityObj.addComponent(this.component);
+    }
+
+    /** Bumps the max-bomb cap by one (powerup pickup). */
+    public increaseMaxBombs() {
+        this.maxBombs = this.maxBombs + 1;
+    }
+
+    /**
+     * Places a bomb on the player's current cell if the player is
+     * under their bomb cap. A 2 second timer detonates it.
+     */
+    public placeBomb() {
+        if (this.bombsPlaced == this.maxBombs) { return null; }
+        this.bombsPlaced = this.bombsPlaced + 1;
+        cx = this.cell.getCellX();
+        cy = this.cell.getCellY();
+        // Aussom's `/` returns double even for int/int, so route
+        // through FXGLMath.floor to land back on int -- spawnBomb's
+        // wrapper signature is (int X, int Y, int Radius).
+        radius = FXGLMath.floor(this.app.TILE_SIZE / 2);
+        bombCtrl = this.app.spawnBomb(cx * this.app.TILE_SIZE,
+                                      cy * this.app.TILE_SIZE,
+                                      radius);
+        this.pendingBomb = bombCtrl;
+        fxgl.getGameTimer().runOnceAfter(::onBombTimer, 2.0);
+    }
+
+    /** Slot holding the bomb whose 2s timer is currently armed. */
+    public pendingBomb = null;
+
+    /** Timer callback: detonate the queued bomb. */
+    public onBombTimer() {
+        if (this.pendingBomb != null) {
+            this.pendingBomb.explode();
+            this.pendingBomb = null;
+            this.bombsPlaced = this.bombsPlaced - 1;
+        }
+    }
+
+    /** Moves the player one cell to the right. */
+    public moveRight() { this.astar.moveToRightCell(); }
+    /** Moves the player one cell to the left. */
+    public moveLeft()  { this.astar.moveToLeftCell();  }
+    /** Moves the player one cell up. */
+    public moveUp()    { this.astar.moveToUpCell();    }
+    /** Moves the player one cell down. */
+    public moveDown()  { this.astar.moveToDownCell();  }
+}
+
+/**
+ * The Bomberman game application. Wires the FXGL lifecycle, parses
+ * the text level into wall / brick entities, spawns the player and
+ * powerups, and handles bomb placement / explosion.
+ */
+class BombermanApp {
+    /** Per-cell pixel size; the grid is 15x15 cells. */
+    public TILE_SIZE = 40;
+    /** Window width in pixels. */
+    public width = 600;
+    /** Window height in pixels. */
+    public height = 600;
+
+    /** The fxglApp returned by fxgl.gameApp. */
+    public app = null;
+    /** Enables the SimpleGameMenu pause menu. Tests turn this off. */
+    public enableMenus = false;
+    /** Running game's GameWorld wrapper. */
+    public world = null;
+    /** Running game's Input wrapper. */
+    public input = null;
+    /** Absolute path to the project directory (for file:// URLs). */
+    public cwd = "";
+    /** FXGLAssetLoaderService wrapper for cwd-relative texture loads. */
+    public assets = null;
+
+    /** The EntityFactory wired to spawn map tiles + dynamic entities. */
+    public factory = null;
+    /** AStarGrid populated from the world after the level loads. */
+    public grid = null;
+    /** The PlayerController for the live player entity. */
+    public player = null;
+    /** Live BombComponent wrappers keyed by entity (kept reachable). */
+    public bombs = [];
+
+    /**
+     * The app entry point.
+     * @p args is the command-line argument list.
+     */
+    public main(args) {
+        this.enableMenus = true;
+        this.build("Bomberman App");
+        this.app.launch();
+    }
+
+    /**
+     * Builds the fxglApp and registers lifecycle callbacks without
+     * launching. Tests use this to attach a driving onUpdate.
+     * @p Title is the window title.
+     * @r The fxglApp wrapper.
+     */
+    public build(string Title) {
+        this.app = fxgl.gameApp(Title, this.width, this.height);
+        this.app.onInitSettings(::onInitSettings);
+        this.app.onInitInput(::onInitInput);
+        this.app.onInitGame(::onInitGame);
+        this.app.onInitPhysics(::onInitPhysics);
+        return this.app;
+    }
+
+    /**
+     * Configures GameSettings: version, scene factory using
+     * SimpleGameMenu for the in-game pause menu.
+     * @p Settings is the GameSettings wrapper.
+     */
+    public onInitSettings(object Settings) {
+        Settings.setVersion("0.1");
+        Settings.setFileSystemWriteAllowed(false);
+        Settings.setUserProfileEnabled(false);
+        Settings.setIntroEnabled(false);
+        Settings.setMainMenuEnabled(false);
+        if (this.enableMenus) {
+            Settings.setGameMenuEnabled(true);
+            sf = new SceneFactory();
+            sf.onGameMenu(::buildGameMenu);
+            Settings.setSceneFactory(sf);
+        } else {
+            Settings.setGameMenuEnabled(false);
+        }
+    }
+
+    /** SceneFactory callback: returns the SimpleGameMenu instance. */
+    public buildGameMenu() { return new SimpleGameMenu(); }
+
+    /**
+     * Binds WASD to player movement and F to bomb placement.
+     */
+    public onInitInput() {
+        this.input = fxgl.getInput();
+
+        up    = new UserAction("Move Up");    up.onActionBegin(::doMoveUp);
+        left  = new UserAction("Move Left");  left.onActionBegin(::doMoveLeft);
+        down  = new UserAction("Move Down");  down.onActionBegin(::doMoveDown);
+        right = new UserAction("Move Right"); right.onActionBegin(::doMoveRight);
+        bomb  = new UserAction("Place Bomb"); bomb.onActionBegin(::doPlaceBomb);
+
+        this.input.addActionKey(up,    "W");
+        this.input.addActionKey(left,  "A");
+        this.input.addActionKey(down,  "S");
+        this.input.addActionKey(right, "D");
+        this.input.addActionKey(bomb,  "F");
+    }
+
+    /** WASD action handlers — null-guarded against missing player. */
+    public doMoveUp()    { if (this.player != null) { this.player.moveUp();    } }
+    public doMoveLeft()  { if (this.player != null) { this.player.moveLeft();  } }
+    public doMoveDown()  { if (this.player != null) { this.player.moveDown();  } }
+    public doMoveRight() { if (this.player != null) { this.player.moveRight(); } }
+    public doPlaceBomb() { if (this.player != null) { this.player.placeBomb(); } }
+
+    /**
+     * Initializes the world: loads the text level into wall / brick
+     * entities, builds an AStarGrid over the result, spawns the
+     * background and the player.
+     */
+    public onInitGame() {
+        this.cwd = file.getCanonicalPath(".");
+        this.world = fxgl.getGameWorld();
+        this.assets = new FXGLAssetLoaderService();
+        this.assets.obj = fxgl.getAssetLoader();
+        this.bombs = [];
+
+        this.factory = fxgl.entityFactory();
+        this.factory.addSpawner("BG",      ::makeBackground);
+        this.factory.addSpawner("w",       ::makeWall);
+        this.factory.addSpawner("b",       ::makeBrick);
+        this.factory.addSpawner("Player",  ::makePlayer);
+        this.factory.addSpawner("Bomb",    ::makeBomb);
+        this.factory.addSpawner("Powerup", ::makePowerup);
+        this.factory.attachTo(this.world);
+
+        // Load the text-based level (1 char = 1 tile, '0' = empty).
+        loader = new TextLevelLoader(this.TILE_SIZE, this.TILE_SIZE, "0");
+        lvl = loader.load("file://" + this.cwd + "/assets/levels/0.txt", this.world);
+        this.world.setLevel(lvl);
+
+        // Build the AStarGrid first, BEFORE we spawn the BG (which
+        // covers every cell and would confuse the classifier).
+        // fromWorld is an instance method on the wrapper, so go
+        // through an empty instance.
+        gridFactory = new AStarGrid(1, 1);
+        this.grid = gridFactory.fromWorld(this.world, 15, 15,
+                                         this.TILE_SIZE, this.TILE_SIZE,
+                                         ::classifyCell);
+
+        this.spawnBackground();
+
+        bg = new SpawnData(0.0, 0.0);
+        this.world.spawnWithData("Player", bg);
+    }
+
+    /**
+     * A* cell classifier. Walls / bricks are obstacles; everything
+     * else is walkable.
+     * @p TypeAjo is an AussomJavaObject around the entity type
+     *    string (FXGL passes the raw type via the predicate).
+     * @r A CellState enum AJO.
+     */
+    public classifyCell(TypeAjo) {
+        if (TypeAjo == null) { return CellState.get("WALKABLE"); }
+        try {
+            name = TypeAjo.invoke("toString");
+            if (name == "WALL" || name == "BRICK") {
+                return CellState.get("NOT_WALKABLE");
+            }
+        } catch (e) {}
+        return CellState.get("WALKABLE");
+    }
+
+    /**
+     * Registers the player-vs-powerup collectible handler.
+     */
+    public onInitPhysics() {
+        fxgl.onCollisionCollectible("PLAYER", "POWERUP", ::onPowerupCollected);
+    }
+
+    /**
+     * Powerup pickup handler: bumps the player's max bomb cap. The
+     * powerup entity is removed by FXGL's collectible-handler hook.
+     * @p PowerupEntity is the picked-up powerup entity.
+     */
+    public onPowerupCollected(object PowerupEntity) {
+        if (this.player != null) { this.player.increaseMaxBombs(); }
+    }
+
+    /**
+     * Called by BombComponent when a brick is in the blast. Marks
+     * the freed cell as walkable on the grid and rolls a 50% chance
+     * to spawn a powerup in its place.
+     * @p Brick is the destroyed brick entity.
+     */
+    public onBrickDestroyed(object Brick) {
+        cellX = FXGLMath.floor((Brick.getX() + 20.0) / this.TILE_SIZE);
+        cellY = FXGLMath.floor((Brick.getY() + 20.0) / this.TILE_SIZE);
+        cell = this.grid.get(cellX, cellY);
+        cell.setState("WALKABLE");
+        if (FXGLMath.randomBool()) {
+            sd = new SpawnData(cellX * 1.0 * this.TILE_SIZE,
+                               cellY * 1.0 * this.TILE_SIZE);
+            this.world.spawnWithData("Powerup", sd);
+        }
+    }
+
+    /**
+     * Spawns a bomb at the given pixel position and returns its
+     * BombComponent so the caller can detonate it later.
+     * @p X is the spawn X position (top-left of the cell).
+     * @p Y is the spawn Y position.
+     * @p Radius is the bomb's blast radius in pixels.
+     * @r The BombComponent controlling the new bomb.
+     */
+    public spawnBomb(int X, int Y, int Radius) {
+        sd = new SpawnData(X * 1.0, Y * 1.0);
+        sd.put("radius", Radius);
+        e = this.world.spawnWithData("Bomb", sd);
+        // Walk our live BombComponent list to find the wrapper that
+        // was attached during the factory spawn (last entry).
+        return this.bombs[this.bombs.size() - 1];
+    }
+
+    /**
+     * Spawns the background filled rectangle directly (no SpawnData).
+     */
+    public spawnBackground() {
+        sd = new SpawnData(0.0, 0.0);
+        this.world.spawnWithData("BG", sd);
+    }
+
+    /**
+     * Factory spawner for "BG": a light-green rectangle covering
+     * the full window at z-index -1.
+     */
+    public makeBackground(object Data) {
+        e = new Entity();
+        rect = new Rectangle(0.0, 0.0, this.width * 1.0, this.height * 1.0);
+        rect.setFill(new Color("#90EE90"));
+        e.addViewNode(rect);
+        e.setZIndex(0 - 1);
+        return e;
+    }
+
+    /**
+     * Factory spawner for the 'w' tile character: a saturated gray
+     * wall block.
+     */
+    public makeWall(object Data) {
+        e = new Entity();
+        e.setType("WALL");
+        e.setPosition(Data.getX(), Data.getY());
+        rect = new Rectangle(0.0, 0.0, 40.0, 40.0);
+        rect.setFill(new Color("#808080"));
+        e.addViewNode(rect);
+        e.addBoundingBox(40.0, 40.0);
+        return e;
+    }
+
+    /**
+     * Factory spawner for the 'b' tile character: a brick texture.
+     */
+    public makeBrick(object Data) {
+        e = new Entity();
+        e.setType("BRICK");
+        e.setPosition(Data.getX(), Data.getY());
+        tex = this.assets.loadTextureFromUrl(
+            "file://" + this.cwd + "/assets/textures/brick.png");
+        tex.setFitWidth(40.0);
+        tex.setFitHeight(40.0);
+        e.addViewNode(tex);
+        e.addBoundingBox(40.0, 40.0);
+        return e;
+    }
+
+    /**
+     * Factory spawner for "Player". Builds a blue 40x40 entity with
+     * CellMoveComponent + AStarMoveComponent + PlayerController.
+     */
+    public makePlayer(object Data) {
+        e = new Entity();
+        e.setType("PLAYER");
+        e.setPosition(Data.getX() + 20.0, Data.getY() + 20.0);
+        e.setLocalAnchor(20.0, 20.0);
+        rect = new Rectangle(0.0, 0.0, this.TILE_SIZE * 1.0, this.TILE_SIZE * 1.0);
+        rect.setFill(new Color("#0000FF"));
+        e.addViewNode(rect);
+        e.addBoundingBox(this.TILE_SIZE * 1.0, this.TILE_SIZE * 1.0);
+        e.addComponent(new CollidableComponent(true));
+
+        cell = new CellMoveComponent(this.TILE_SIZE, this.TILE_SIZE, 150.0);
+        astar = new AStarMoveComponent(this.grid);
+
+        ctrl = new PlayerController(this, cell, astar);
+        ctrl.attachTo(e);
+        this.player = ctrl;
+        return e;
+    }
+
+    /**
+     * Factory spawner for "Bomb". Builds a bomb entity carrying a
+     * BombComponent with the requested blast radius.
+     */
+    public makeBomb(object Data) {
+        e = new Entity();
+        e.setType("BOMB");
+        e.setPosition(Data.getX(), Data.getY());
+        tex = this.assets.loadTextureFromUrl(
+            "file://" + this.cwd + "/assets/textures/bomb.png");
+        e.addViewNode(tex);
+        e.addBoundingBox(tex.getWidth(), tex.getHeight());
+        e.setLocalAnchor(13.0, 11.0);
+
+        radius = Data.get("radius");
+        ctrl = new BombComponent(this, radius);
+        ctrl.attachTo(e);
+        this.bombs.add(ctrl);
+        return e;
+    }
+
+    /**
+     * Factory spawner for "Powerup". Yellow square that, when picked
+     * up, increases the player's max bomb cap.
+     */
+    public makePowerup(object Data) {
+        e = new Entity();
+        e.setType("POWERUP");
+        e.setPosition(Data.getX(), Data.getY());
+        rect = new Rectangle(0.0, 0.0, this.TILE_SIZE * 1.0, this.TILE_SIZE * 1.0);
+        rect.setFill(new Color("#FFFF00"));
+        e.addViewNode(rect);
+        e.addBoundingBox(this.TILE_SIZE * 1.0, this.TILE_SIZE * 1.0);
+        e.addComponent(new CollidableComponent(true));
+        return e;
+    }
+}

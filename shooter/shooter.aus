@@ -53,8 +53,6 @@ class ShooterApp {
     public input = null;
     /** The running game's Timer wrapper. */
     public timer = null;
-    /** Number of active enemies. */
-    public enemies = 0;
 
     /**
      * The app entry point. Configures the lifecycle callbacks and
@@ -62,7 +60,7 @@ class ShooterApp {
      * @p args is a list of command line arguments.
      */
     public main(args) {
-        this.build("Shooter");
+        this.build("Shooter App");
         this.app.launch();
     }
 
@@ -88,9 +86,23 @@ class ShooterApp {
      * @p Settings is the GameSettings wrapper.
      */
     public onInitSettings(object Settings) {
+        Settings.setVersion("1.0");
         Settings.setFileSystemWriteAllowed(false);
         Settings.setUserProfileEnabled(false);
     }
+
+    /**
+     * @r The number of active enemies, read from the FXGL world
+     *    properties (the original Java keeps this in
+     *    `vars.put("enemies", 0)`).
+     */
+    public getEnemies() { return fxgl.geti("enemies"); }
+
+    /**
+     * Sets the active enemy count.
+     * @p Value is the new count.
+     */
+    public setEnemies(int Value) { fxgl.set("enemies", Value); }
 
     /**
      * Binds the left mouse button to the shoot action.
@@ -108,7 +120,7 @@ class ShooterApp {
      */
     public onInitGame() {
         this.world = fxgl.getGameWorld();
-        this.enemies = 0;
+        fxgl.set("enemies", 0);
         this.timer = fxgl.getGameTimer();
         this.timer.runAtInterval(::trySpawnEnemy, 1.0);
     }
@@ -130,7 +142,7 @@ class ShooterApp {
     public onBulletHitEnemy(object BulletEntity, object EnemyEntity) {
         BulletEntity.removeFromWorld();
         EnemyEntity.removeFromWorld();
-        this.enemies = this.enemies - 1;
+        fxgl.inc("enemies", 0 - 1);
     }
 
     /**
@@ -138,11 +150,11 @@ class ShooterApp {
      * upper half of the screen when the cap is not yet reached.
      */
     public trySpawnEnemy() {
-        if (this.enemies < this.maxEnemies) {
+        if (fxgl.geti("enemies") < this.maxEnemies) {
             x = FXGLMath.randomDouble(0.0, fxgl.getAppWidth() - 40.0);
             y = FXGLMath.randomDouble(0.0, fxgl.getAppHeight() / 2.0 - 40.0);
             this.spawnEnemy(x, y);
-            this.enemies = this.enemies + 1;
+            fxgl.inc("enemies", 1);
         }
     }
 

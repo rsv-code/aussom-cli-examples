@@ -61,13 +61,13 @@ class shooterTest : test {
 
         if (this.capturedFirst == false) {
             this.capturedFirst = true;
-            this.startEnemies = this.game.enemies;
+            this.startEnemies = this.game.getEnemies();
             this.startCount = this.game.world.getEntityCount();
 
             // Enemy sits at y=100..140; bullet starts 100 px below and
             // flies straight up through it.
             this.game.spawnEnemy(200.0, 100.0);
-            this.game.enemies = this.game.enemies + 1;
+            this.game.setEnemies(this.game.getEnemies() + 1);
             this.countAfterEnemy = this.game.world.getEntityCount();
 
             this.game.spawnBullet(200.0, 200.0);
@@ -76,11 +76,11 @@ class shooterTest : test {
 
         if (this.capturedAfterCollision == false && this.elapsed > 0.5) {
             this.capturedAfterCollision = true;
-            this.enemiesAfterCollision = this.game.enemies;
+            this.enemiesAfterCollision = this.game.getEnemies();
         }
 
         if (this.elapsed > 1.5) {
-            this.enemiesAtExit = this.game.enemies;
+            this.enemiesAtExit = this.game.getEnemies();
             this.app.exit();
         }
     }

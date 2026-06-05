@@ -1,0 +1,356 @@
+/*
+ * Copyright 2026 Austin Lehman
+ *
+ * Per-entity controllers for the Tower Defense port. Each controller
+ * holds the live Entity wrapper plus the FXGL components it cares about
+ * (HP, effects, the driving Component). Holding the wrappers directly
+ * avoids per-frame component lookups by class.
+ *
+ *   EnemyController  - HP, EffectComponent, and a Component that walks
+ *                      the enemy through its Way waypoints.
+ *   TowerController  - a Component that targets the nearest enemy and
+ *                      fires through the app's spawnBullet helper.
+ *   BulletController - a Component that chases its target, deals damage
+ *                      via the EnemyController on hit, and rolls each
+ *                      tower on-hit effect.
+ */
+
+include fxgl;
+include fxgl.Component;
+include fxgl.HealthIntComponent;
+include fxgl.EffectComponent;
+include fxgl.FXGLMath;
+include data;
+include buffs;
+
+/**
+ * Holds everything an enemy entity needs and walks it along its path.
+ */
+class EnemyController {
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+    /** Enemy stats block. */
+    public data = null;
+    /** The owning Entity wrapper (set by attachTo). */
+    public entity = null;
+    /** HealthIntComponent wrapper attached to the entity. */
+    public hp = null;
+    /** EffectComponent wrapper attached to the entity. */
+    public effects = null;
+    /** Driving Component that handles path walking. */
+    public mover = null;
+    /** Remaining waypoints (first element is the next target). */
+    public waypoints = [];
+    /** True once the controller has fired its reached-end callback. */
+    public ended = false;
+
+    /**
+     * @p AppRef is the TowerDefenseApp instance.
+     * @p WayObj is the Way wrapper for the path to walk.
+     * @p EnemyData is the enemy stats block.
+     */
+    public EnemyController(object AppRef, object WayObj, object EnemyData) {
+        this.app = AppRef;
+        this.data = EnemyData;
+        this.waypoints = WayObj.copyPoints();
+        this.hp = new HealthIntComponent(EnemyData.hp);
+        this.effects = new EffectComponent();
+        this.mover = new Component();
+        this.mover.onAdded(::onAdded);
+        this.mover.onUpdate(::onUpdate);
+    }
+
+    /**
+     * Attaches the controller's components to the given entity.
+     * @p EntityObj is the enemy Entity wrapper.
+     */
+    public attachTo(object EntityObj) {
+        this.entity = EntityObj;
+        EntityObj.addComponent(this.hp);
+        EntityObj.addComponent(this.effects);
+        EntityObj.addComponent(this.mover);
+    }
+
+    /**
+     * Snaps the entity onto the first waypoint and drops it from the
+     * remaining list.
+     * @p EntityObj is the entity the component was added to.
+     */
+    public onAdded(object EntityObj) {
+        first = this.waypoints[0];
+        this.waypoints = this.tail();
+        this.entity.setPosition(first.getX(), first.getY());
+    }
+
+    /**
+     * Moves the entity toward the next waypoint at `data.moveSpeed`,
+     * advancing the waypoint list as it reaches each one. Signals the
+     * app once the path is exhausted.
+     * @p tpf is the per-frame time in seconds.
+     */
+    public onUpdate(tpf) {
+        if (this.waypoints.size() == 0) {
+            return null;
+        }
+        next = this.waypoints[0];
+        dx = next.getX() - this.entity.getX();
+        dy = next.getY() - this.entity.getY();
+        d2 = dx * dx + dy * dy;
+        speed = tpf * 60.0 * this.data.moveSpeed;
+        if (d2 < speed * speed) {
+            this.entity.setPosition(next.getX(), next.getY());
+            this.waypoints = this.tail();
+            if (this.waypoints.size() == 0 && this.ended == false) {
+                this.ended = true;
+                this.app.onEnemyReachedEnd(this);
+                this.entity.removeFromWorld();
+            }
+        } else {
+            len = FXGLMath.sqrt(d2);
+            this.entity.translate(dx / len * speed, dy / len * speed);
+        }
+    }
+
+    /**
+     * @r A copy of `waypoints` minus its first element.
+     */
+    public tail() {
+        out = [];
+        i = 1;
+        while (i < this.waypoints.size()) {
+            out.add(this.waypoints[i]);
+            i = i + 1;
+        }
+        return out;
+    }
+}
+
+/**
+ * Aims a tower at the nearest enemy and fires a bullet at the tower's
+ * attack rate.
+ */
+class TowerController {
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+    /** Tower stats block. */
+    public data = null;
+    /** The owning Entity wrapper (set by attachTo). */
+    public entity = null;
+    /** Parsed list of OnHitEffect wrappers. */
+    public effects = [];
+    /** Per-bullet damage multiplier; reset to 1.0 after each shot. */
+    public damageModifier = 1.0;
+    /** Driving Component. */
+    public shooter = null;
+    /** Reload timer (LocalTimer wrapper). */
+    public shootTimer = null;
+
+    /**
+     * @p AppRef is the TowerDefenseApp instance.
+     * @p TowerData is the tower's stats block.
+     * @p OnHitList is a list of parsed OnHitEffect wrappers.
+     */
+    public TowerController(object AppRef, object TowerData, list OnHitList) {
+        this.app = AppRef;
+        this.data = TowerData;
+        this.effects = OnHitList;
+        this.shooter = new Component();
+        this.shooter.onAdded(::onAdded);
+        this.shooter.onUpdate(::onUpdate);
+    }
+
+    /**
+     * @p EntityObj is the tower Entity wrapper.
+     */
+    public attachTo(object EntityObj) {
+        this.entity = EntityObj;
+        EntityObj.addComponent(this.shooter);
+    }
+
+    /**
+     * Captures the shoot timer when the component is added.
+     * @p EntityObj is the tower entity.
+     */
+    public onAdded(object EntityObj) {
+        this.shootTimer = fxgl.getGameTimer().newLocalTimer();
+        this.shootTimer.capture();
+    }
+
+    /**
+     * Once the shoot timer reaches the attack interval, finds the
+     * nearest active enemy, rotates the tower toward it, and asks the
+     * app to spawn a bullet.
+     * @p tpf is the per-frame time in seconds.
+     */
+    public onUpdate(tpf) {
+        if (this.entity == null) {
+            return null;
+        }
+        interval = 1.0 / this.data.attackRate;
+        if (this.shootTimer.elapsed(interval) == false) {
+            return null;
+        }
+        target = this.app.findNearestEnemy(this.entity);
+        if (target != null) {
+            ex = this.entity.getX();
+            ey = this.entity.getY();
+            tx = target.entity.getX();
+            ty = target.entity.getY();
+            this.entity.rotateToVector(tx - ex, ty - ey);
+            this.entity.rotateBy(90.0);
+            this.app.spawnBullet(this, target);
+            this.shootTimer.capture();
+        }
+    }
+
+    /** @r The base attack damage from the tower data. */
+    public getDamage() { return this.data.attack; }
+
+    /** @r The current damage multiplier (set by crit effects). */
+    public getDamageModifier() { return this.damageModifier; }
+
+    /**
+     * @p NewModifier is the new multiplier to apply.
+     */
+    public setDamageModifier(double NewModifier) {
+        this.damageModifier = NewModifier;
+    }
+
+    /** Resets the damage modifier back to 1.0. */
+    public resetDamageModifier() {
+        this.damageModifier = 1.0;
+    }
+}
+
+/**
+ * Drives a single bullet toward its target. On contact deals damage
+ * (or splash damage to nearby enemies), rolls each tower on-hit
+ * effect, and removes itself.
+ */
+class BulletController {
+    /** Back-reference to TowerDefenseApp. */
+    public app = null;
+    /** The TowerController that fired this bullet. */
+    public shooter = null;
+    /** The target EnemyController. */
+    public target = null;
+    /** The owning Entity wrapper (set by attachTo). */
+    public entity = null;
+    /** Driving Component. */
+    public comp = null;
+
+    /**
+     * @p AppRef is the TowerDefenseApp instance.
+     * @p Shooter is the TowerController that fired this bullet.
+     * @p Target is the target EnemyController.
+     */
+    public BulletController(object AppRef, object Shooter, object Target) {
+        this.app = AppRef;
+        this.shooter = Shooter;
+        this.target = Target;
+        this.comp = new Component();
+        this.comp.onAdded(::onAdded);
+        this.comp.onUpdate(::onUpdate);
+    }
+
+    /**
+     * @p EntityObj is the bullet Entity wrapper.
+     */
+    public attachTo(object EntityObj) {
+        this.entity = EntityObj;
+        EntityObj.addComponent(this.comp);
+    }
+
+    /**
+     * @p EntityObj is the bullet entity (component-added callback arg).
+     */
+    public onAdded(object EntityObj) {
+    }
+
+    /**
+     * Removes the bullet if the target died, otherwise chases the
+     * target. On contact applies damage and any on-hit effects.
+     * @p tpf is the per-frame time in seconds.
+     */
+    public onUpdate(tpf) {
+        if (this.entity == null) {
+            return null;
+        }
+        if (this.target.entity == null || this.target.entity.isActive() == false) {
+            this.entity.removeFromWorld();
+            return null;
+        }
+        step = Config.BULLET_SPEED() * tpf;
+        if (this.entity.distanceBBox(this.target.entity) < step) {
+            this.onTargetHit();
+            return null;
+        }
+        // Chase the actual bbox center, not a hardcoded TILE_SIZE/2
+        // offset (enemy textures are not the same size as a tile).
+        tcx = this.target.entity.getX() + this.target.entity.getWidth() / 2.0;
+        tcy = this.target.entity.getY() + this.target.entity.getHeight() / 2.0;
+        this.entity.translateTowards(tcx, tcy, step);
+    }
+
+    /**
+     * Resolves the hit. For splash-damage towers, all nearby enemies
+     * take damage; otherwise just the primary target.
+     */
+    public onTargetHit() {
+        targets = [];
+        if (this.shooter.data.isSplashDamage) {
+            // Mirror the original: splash is the TARGET'S bbox
+            // extended by (5, 5) px on each side. Enemies whose
+            // axis-aligned bbox intersects that rectangle take
+            // damage. (Java uses target.bboxComponent.range(5, 5)
+            // + getEntitiesInRange; we hand-roll the intersect
+            // against `this.app.enemies` because that is the
+            // authoritative live-enemy list in the Aussom port.)
+            tx = this.target.entity.getX();
+            ty = this.target.entity.getY();
+            tw = this.target.entity.getWidth();
+            th = this.target.entity.getHeight();
+            rMinX = tx - 5.0;
+            rMinY = ty - 5.0;
+            rMaxX = tx + tw + 5.0;
+            rMaxY = ty + th + 5.0;
+            for (en : this.app.enemies) {
+                if (en.entity != null && en.entity.isActive()) {
+                    eMinX = en.entity.getX();
+                    eMinY = en.entity.getY();
+                    eMaxX = eMinX + en.entity.getWidth();
+                    eMaxY = eMinY + en.entity.getHeight();
+                    if (eMinX < rMaxX && eMaxX > rMinX
+                        && eMinY < rMaxY && eMaxY > rMinY) {
+                        targets.add(en);
+                    }
+                }
+            }
+        } else {
+            targets.add(this.target);
+        }
+
+        for (effect : this.shooter.effects) {
+            if (FXGLMath.randomDouble(0.0, 1.0) < effect.getChance()) {
+                for (t : targets) {
+                    effect.onTriggered(this.shooter, t);
+                    durEffect = effect.getEffect();
+                    if (durEffect != null) {
+                        t.effects.startEffect(durEffect);
+                    }
+                }
+            }
+        }
+
+        this.entity.removeFromWorld();
+
+        damage = FXGLMath.floor(this.shooter.getDamage() * this.shooter.getDamageModifier());
+        for (t : targets) {
+            t.hp.damage(damage);
+            this.shooter.resetDamageModifier();
+            if (t.hp.isZero()) {
+                this.app.killEnemy(t);
+            }
+        }
+    }
+}
